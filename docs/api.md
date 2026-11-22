@@ -49,7 +49,8 @@ Parâmetros:
 - `since`/`until`: ISO 8601 com fuso, ou data `AAAA-MM-DD` (UTC; em `until` vale até 23:59:59).
 - `limit`: padrão 50, acima de 200 vira 200, menor que 1 é 400.
 - `media/request`: no máximo 20 por chamada; `remaining_today` conta os pedidos das últimas 24 h (janela
-  móvel, teto 200). 429 só quando a janela já está cheia e havia mídia para pedir.
+  móvel, teto 200). 429 só quando a janela já está cheia e havia mídia para pedir. Cada pedido chega ao
+  celular uma vez: sem resposta, ele fecha e a mídia continua `expired`, para pedir de novo.
 
 Erro: `{"detail":{"code","msg"}}`. Além dos códigos do contrato (`unauthorized` 401, `bad_request` 400,
 `not_paired` 409, `busy` 503, `outdated` 409, `rate_limited` 429): `internal` 500 para falha inesperada e

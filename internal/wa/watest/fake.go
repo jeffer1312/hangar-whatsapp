@@ -28,6 +28,21 @@ type Client struct {
 	phones    []string
 	logouts   int
 	downloads int
+	retries   int
+	// Set before the event that triggers them: what DownloadToFile and SendMediaRetryReceipt return.
+	downloadErr, retryErr error
+}
+
+func (f *Client) Fail(download, retry error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.downloadErr, f.retryErr = download, retry
+}
+
+func (f *Client) Retries() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.retries
 }
 
 func New(device *wastore.Device) *Client {
@@ -72,16 +87,23 @@ func (f *Client) ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*ev
 func (f *Client) DownloadToFile(ctx context.Context, msg whatsmeow.DownloadableMessage, file whatsmeow.File) error {
 	f.mu.Lock()
 	f.downloads++
+	err := f.downloadErr
 	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	if _, ok := file.(*os.File); !ok {
 		return errors.New("watest: download target is not a file")
 	}
-	_, err := io.WriteString(file, "IMG")
+	_, err = io.WriteString(file, "IMG")
 	return err
 }
 
 func (f *Client) SendMediaRetryReceipt(ctx context.Context, info *types.MessageInfo, key []byte) error {
-	return nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retries++
+	return f.retryErr
 }
 
 func (f *Client) Emit(evt any) {

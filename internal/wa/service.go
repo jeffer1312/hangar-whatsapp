@@ -29,6 +29,8 @@ const API = 1
 // (60 s plus five of 20 s).
 const pairWindow = 160 * time.Second
 
+const logoutTimeout = 10 * time.Second
+
 const (
 	StateUnpaired  = "unpaired"
 	StatePairing   = "pairing"
@@ -42,6 +44,7 @@ var (
 	ErrAlreadyPaired = errors.New("este aparelho já está pareado; desconecte antes de parear de novo")
 	ErrOutdated      = errors.New("outdated")
 	ErrBadPhone      = errors.New("número inválido: só dígitos, com DDI (ex.: 5564999999999)")
+	ErrUnavailable   = errors.New("a pasta de dados não reabriu depois de apagar; reinicie o serviço")
 )
 
 var phoneDigits = regexp.MustCompile(`^[1-9][0-9]{7,14}$`)
@@ -186,6 +189,7 @@ func (s *Service) stop() {
 	cli := s.cli
 	s.cli = nil
 	s.gen++
+	s.resetLocked(StateUnpaired, "")
 	s.mu.Unlock()
 	if cli != nil {
 		cli.Disconnect()
@@ -285,7 +289,10 @@ func (s *Service) Pair(phone string) error {
 	}
 	s.rw.RLock()
 	defer s.rw.RUnlock()
-	in := s.in
+	in, err := s.instance()
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	switch s.state {
@@ -379,10 +386,13 @@ func (s *Service) Logout(ctx context.Context) error {
 	s.mu.Lock()
 	cli, g, state := s.cli, s.gen, s.state
 	s.mu.Unlock()
-	if state != StateConnected {
+	if state != StateConnected || cli == nil {
 		return ErrNotPaired
 	}
-	if err := cli.Logout(ctx); err != nil {
+	// Bounded: a wipe waiting for rw would otherwise hold every other request behind this one.
+	lctx, cancel := context.WithTimeout(ctx, logoutTimeout)
+	defer cancel()
+	if err := cli.Logout(lctx); err != nil {
 		return err
 	}
 	s.update(g, func() { s.resetLocked(StateLoggedOut, "") })
@@ -397,13 +407,15 @@ func (s *Service) Wipe(ctx context.Context) error {
 	cli, state := s.cli, s.state
 	s.mu.Unlock()
 	if state == StateConnected && cli != nil {
-		lctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		lctx, cancel := context.WithTimeout(ctx, logoutTimeout)
 		if err := cli.Logout(lctx); err != nil {
 			s.opt.Log.Warn("desvincular antes de apagar", "erro", err)
 		}
 		cancel()
 	}
 	s.stop()
+	// Reopens even when a delete failed: the service must keep answering, and what was left
+	// behind is reported.
 	var errs []error
 	for _, path := range []string{store.MessagesPath(s.opt.Dir), store.SessionPath(s.opt.Dir)} {
 		for _, suffix := range []string{"", "-wal", "-shm"} {
@@ -413,10 +425,16 @@ func (s *Service) Wipe(ctx context.Context) error {
 		}
 	}
 	errs = append(errs, os.RemoveAll(filepath.Join(s.opt.Dir, "media")))
-	if err := errors.Join(errs...); err != nil {
-		return err
+	errs = append(errs, s.start())
+	return errors.Join(errs...)
+}
+
+// instance returns the open data folder; nil only after a reopen failed, which the log explains.
+func (s *Service) instance() (*instance, error) {
+	if s.in == nil {
+		return nil, ErrUnavailable
 	}
-	return s.start()
+	return s.in, nil
 }
 
 func optional(s string) *string {
@@ -443,7 +461,11 @@ func maskPhone(user string) string {
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	s.rw.RLock()
 	defer s.rw.RUnlock()
-	sum, err := s.in.db.Totals(ctx)
+	in, err := s.instance()
+	if err != nil {
+		return Status{}, err
+	}
+	sum, err := in.db.Totals(ctx)
 	if err != nil {
 		return Status{}, err
 	}
@@ -468,19 +490,31 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 func (s *Service) Chats(ctx context.Context, q string, limit int) ([]store.Chat, error) {
 	s.rw.RLock()
 	defer s.rw.RUnlock()
-	return s.in.db.Chats(ctx, q, limit)
+	in, err := s.instance()
+	if err != nil {
+		return nil, err
+	}
+	return in.db.Chats(ctx, q, limit)
 }
 
 func (s *Service) Messages(ctx context.Context, q store.MessagesQuery) (store.MessagesPage, error) {
 	s.rw.RLock()
 	defer s.rw.RUnlock()
-	return s.in.db.Messages(ctx, q)
+	in, err := s.instance()
+	if err != nil {
+		return store.MessagesPage{}, err
+	}
+	return in.db.Messages(ctx, q)
 }
 
 func (s *Service) Search(ctx context.Context, q, chat string, limit int) ([]store.Message, error) {
 	s.rw.RLock()
 	defer s.rw.RUnlock()
-	return s.in.db.Search(ctx, q, chat, limit)
+	in, err := s.instance()
+	if err != nil {
+		return nil, err
+	}
+	return in.db.Search(ctx, q, chat, limit)
 }
 
 // RequestMedia marks old media for the phone to send; each one is a notification on the phone.
@@ -497,9 +531,13 @@ func (s *Service) RequestMedia(ctx context.Context, chat, id, since string) (sto
 	default:
 		return store.MediaRequest{}, ErrNotPaired
 	}
-	r, err := s.in.db.RequestMedia(ctx, chat, id, since, s.now())
+	in, err := s.instance()
+	if err != nil {
+		return store.MediaRequest{}, err
+	}
+	r, err := in.db.RequestMedia(ctx, chat, id, since, s.now())
 	if err == nil && r.Requested > 0 {
-		s.in.media.wake()
+		in.media.wake()
 	}
 	return r, err
 }

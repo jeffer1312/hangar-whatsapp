@@ -103,7 +103,8 @@ func serve(data string, log *slog.Logger) error {
 		ln.Close()
 		return err
 	}
-	srv := &http.Server{Handler: api.New(svc, key, time.Now, log), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Handler: api.New(svc, key, time.Now, log),
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 30 * time.Second}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 	log.Info("pronto", "versão", version, "porta", port, "pasta", data)

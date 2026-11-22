@@ -127,7 +127,9 @@ func (m *media) download(ctx context.Context, p store.Pending) {
 	}
 	rel := store.MediaRel(p.Chat, p.ID, ext)
 	err = m.save(ctx, cli, target, rel)
+	asked := false
 	if expired(err) && p.Requested {
+		asked = true
 		// Old media leaves the WhatsApp server; the phone, if it still has the file, uploads it again.
 		target, err = m.askPhone(ctx, cli, info, target)
 		if err == nil {
@@ -145,6 +147,12 @@ func (m *media) download(ctx context.Context, p store.Pending) {
 		m.lost(ctx, p, "phone_refused")
 	case expired(err):
 		m.lost(ctx, p, "expired")
+	case asked:
+		// Left open, every restart would notify the phone again outside the daily cap.
+		m.log.Warn("o celular não atendeu o pedido de mídia; peça de novo se precisar", "id", p.ID, "erro", err)
+		if err := m.db.CloseRequest(ctx, p.Chat, p.ID, m.now()); err != nil {
+			m.log.Error("fechar pedido de mídia", "erro", err)
+		}
 	default:
 		m.log.Warn("mídia adiada para a próxima execução", "id", p.ID, "erro", err)
 		m.mu.Lock()

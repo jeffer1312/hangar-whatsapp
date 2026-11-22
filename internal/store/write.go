@@ -86,7 +86,7 @@ func (d *DB) MediaSaved(ctx context.Context, chat, id, rel string, now time.Time
 		rel, chat, id); err != nil {
 		return err
 	}
-	return d.closeRequest(ctx, chat, id, now)
+	return d.CloseRequest(ctx, chat, id, now)
 }
 
 // MediaLost with code expired keeps the request open path available: only the phone has the
@@ -99,10 +99,12 @@ func (d *DB) MediaLost(ctx context.Context, chat, id, code string, now time.Time
 	if code == "expired" {
 		return nil
 	}
-	return d.closeRequest(ctx, chat, id, now)
+	return d.CloseRequest(ctx, chat, id, now)
 }
 
-func (d *DB) closeRequest(ctx context.Context, chat, id string, now time.Time) error {
+// CloseRequest ends an open request without touching the message: each request reaches the
+// phone once, and asking again goes through RequestMedia and its caps.
+func (d *DB) CloseRequest(ctx context.Context, chat, id string, now time.Time) error {
 	_, err := d.w.ExecContext(ctx, `UPDATE media_requests SET done_at = ? WHERE chat = ? AND id = ? AND done_at IS NULL`,
 		now.UTC().Format(TimeLayout), chat, id)
 	return err

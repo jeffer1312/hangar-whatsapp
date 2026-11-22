@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -238,6 +239,59 @@ func TestWipeClosesAndDeletesThenStartsFresh(t *testing.T) {
 	}
 	if err := h.svc.Pair(""); err != nil {
 		t.Fatalf("pair after wipe: %v", err)
+	}
+}
+
+func TestFailedWipeKeepsTheServiceAnswering(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("needs a folder the test user cannot empty")
+	}
+	h := newHarness(t, true)
+	locked := filepath.Join(h.dir, "media", "x")
+	if err := os.MkdirAll(locked, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(locked, "a.jpg"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o700) })
+	if err := h.svc.Wipe(context.Background()); err == nil {
+		t.Fatal("wipe with an undeletable file reported success")
+	}
+	s := h.status()
+	if s.State != "unpaired" {
+		t.Fatalf("after a failed wipe = state %s, want unpaired (the keys are gone)", s.State)
+	}
+	if _, err := h.svc.Chats(context.Background(), "", 10); err != nil {
+		t.Fatalf("reads after a failed wipe: %v", err)
+	}
+	if err := h.svc.Logout(context.Background()); !errors.Is(err, ErrNotPaired) {
+		t.Fatalf("logout after a failed wipe = %v", err)
+	}
+}
+
+func TestUnansweredPhoneRequestIsClosed(t *testing.T) {
+	h := newHarness(t, true)
+	c := h.client()
+	c.Fail(whatsmeow.ErrMediaDownloadFailedWith404, errors.New("phone offline"))
+	evt := watest.Text("OLD1", "", msgAt)
+	evt.Message = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg"), DirectPath: proto.String("/x")}}
+	c.Emit(evt)
+	watest.WaitFor(t, "the expired mark", func() bool { return h.status().Totals.MediaPhoneOnly == 1 })
+	r, err := h.svc.RequestMedia(context.Background(), chatA, "OLD1", "")
+	if err != nil || r.Requested != 1 {
+		t.Fatalf("RequestMedia = %+v, %v", r, err)
+	}
+	// Left open, the request would be sent to the phone again on every restart, outside the cap.
+	watest.WaitFor(t, "the request to close", func() bool {
+		list, err := h.svc.in.db.Pending(context.Background(), nil, 10)
+		return c.Retries() == 1 && err == nil && len(list) == 0
+	})
+	if s := h.status(); s.Totals.MediaPhoneOnly != 1 {
+		t.Fatalf("media no longer marked as phone-only: %+v", s.Totals)
 	}
 }
 
