@@ -75,8 +75,9 @@ func (b *buffered) WriteHeader(status int) {
 	}
 }
 
-// signed checks the request signature and signs every response, errors included, so whoever
-// takes over an old port can neither read a request nor fake an answer.
+// signed checks the request signature and signs every response, errors included, so whoever takes
+// over an old port cannot fake an answer. It gives authenticity, not secrecy: that process still
+// reads the plain-text query and body.
 func (s *server) signed(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		out := &buffered{header: http.Header{}}

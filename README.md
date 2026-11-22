@@ -2,7 +2,8 @@
 
 Arquivador **só de leitura** do seu WhatsApp para o [Hangar](https://hangar.dev.br). Ele entra como aparelho
 conectado (igual ao WhatsApp Web), guarda mensagens, histórico e mídia numa pasta local e deixa as sessões do
-Hangar lerem e buscarem esse arquivo. Não envia mensagem, não marca como lida, não mostra "online".
+Hangar lerem e buscarem esse arquivo. Não envia mensagem, não marca como lida, não mostra "online". Só manda,
+pelo whatsmeow, os recibos de entrega automáticos, os mesmos que o celular já manda, e nunca recibo de leitura.
 
 > **Risco.** É um cliente não oficial ([whatsmeow](https://github.com/tulir/whatsmeow)). O WhatsApp pode
 > banir o número que usar cliente não oficial. Só ler é o uso de menor risco, mas não é risco zero.
@@ -10,6 +11,9 @@ Hangar lerem e buscarem esse arquivo. Não envia mensagem, não marca como lida,
 
 O Hangar instala, atualiza e supervisiona este binário pela página Configurações > WhatsApp. Rodar à mão só
 faz sentido para depurar.
+
+Cada release traz um `checksums.txt` (sha256). Ele confere que o download não se corrompeu, mas vem da
+mesma release: não protege contra uma release comprometida.
 
 ## Uso
 

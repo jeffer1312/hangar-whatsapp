@@ -32,6 +32,11 @@ hex = HMAC-SHA256(key, TS_DO_PEDIDO + "\n" + STATUS + "\n" + hex(sha256(body)))
 `STATUS` em decimal. No 401 de pedido sem `ts` legível e no 413 (corpo acima de 64 KB), `TS_DO_PEDIDO` é
 vazio.
 
+A assinatura dá autenticidade, não sigilo. Um processo que ocupe a porta antiga não consegue forjar
+resposta, porque não tem a chave. Mas ele lê em texto claro a query e o corpo do pedido: conversa, busca,
+telefone do pareamento. O tráfego é só em `127.0.0.1`, então o risco existe só em máquina com vários
+usuários.
+
 Na query, `+` de fuso vai como `%2B` (senão vira espaço e dá 400); assine a URI já codificada, a mesma que vai
 no pedido.
 
@@ -88,6 +93,10 @@ outros.
 ## Processo
 
 - `--version` imprime `hangar-whatsapp <versão> (api <n>)`.
+- Só leitura quer dizer que nenhuma mensagem é enviada. O whatsmeow manda sozinho os recibos de entrega
+  (os mesmos que o celular já manda) e nenhum recibo de leitura. Fora o login, o logout (`logout`,
+  `wipe`) e as reconexões, a única chamada de saída do serviço é o pedido de reenvio de mídia ao celular
+  (`POST /v1/media/request`).
 - O log sai em stderr, no formato texto do `slog`. Ele traz os avisos e erros do whatsmeow (`módulo=whatsapp`
   ou `módulo=sessão`) e os eventos de conexão: conectado, queda, sessão aberta em outro cliente,
   suspensão, conexão recusada e mensagem não decifrada.
