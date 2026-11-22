@@ -29,7 +29,11 @@ Resposta, cabeçalho `X-Hangar-Signature: <hex>`, em **toda** resposta, erros in
 hex = HMAC-SHA256(key, TS_DO_PEDIDO + "\n" + STATUS + "\n" + hex(sha256(body)))
 ```
 
-`STATUS` em decimal. No 401 de pedido sem `ts` legível, `TS_DO_PEDIDO` é vazio.
+`STATUS` em decimal. No 401 de pedido sem `ts` legível e no 413 (corpo acima de 64 KB), `TS_DO_PEDIDO` é
+vazio.
+
+Na query, `+` de fuso vai como `%2B` (senão vira espaço e dá 400); assine a URI já codificada, a mesma que vai
+no pedido.
 
 ## Rotas
 
@@ -62,7 +66,8 @@ Erro: `{"detail":{"code","msg"}}`. Além dos códigos do contrato (`unauthorized
 - `unpaired`: sem aparelho;
 - `pairing`: QR e, se pedido com `phone`, código;
 - `connected`: aparelho vinculado (a rede reconecta sozinha);
-- `logged_out`: o celular desvinculou ou houve `logout`; dados mantidos;
+- `logged_out`: o celular desvinculou ou houve `logout`; dados mantidos. Fica só na memória: depois de
+  reiniciar o serviço, volta como `unpaired`;
 - `outdated`: o WhatsApp recusou a versão.
 
 `device` (número mascarado, `+5564••••2222`) e `device_name` (como o celular lista o aparelho, `Google
