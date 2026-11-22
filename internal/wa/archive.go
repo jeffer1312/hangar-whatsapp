@@ -113,6 +113,7 @@ func (a *archiver) history(cli Client, e *events.HistorySync) {
 			evt, err := cli.ParseWebMessage(jid, web)
 			if err != nil {
 				a.log.Warn("mensagem do histórico ilegível", "erro", err)
+				failures++
 				continue
 			}
 			if _, failed := a.message(cli, evt, chat); failed {
