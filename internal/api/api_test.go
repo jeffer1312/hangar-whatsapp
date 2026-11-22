@@ -15,6 +15,7 @@ import (
 	"time"
 
 	wastore "go.mau.fi/whatsmeow/store"
+	waLog "go.mau.fi/whatsmeow/util/log"
 
 	"github.com/jeffer1312/hangar-whatsapp/internal/wa"
 	"github.com/jeffer1312/hangar-whatsapp/internal/wa/watest"
@@ -33,7 +34,7 @@ func newEnv(t *testing.T, paired bool) *env {
 	t.Helper()
 	e := &env{t: t, clients: watest.NewFactory(paired)}
 	svc, err := wa.Open(context.Background(), wa.Options{Dir: t.TempDir(), Version: "0.1.0",
-		Now: func() time.Time { return now }, NewClient: func(d *wastore.Device) wa.Client { return e.clients.New(d) }})
+		Now: func() time.Time { return now }, NewClient: func(d *wastore.Device, l waLog.Logger) wa.Client { return e.clients.New(d, l) }})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,6 +14,7 @@ import (
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/jeffer1312/hangar-whatsapp/internal/store"
@@ -37,7 +38,7 @@ func newHarness(t *testing.T, paired bool) *harness {
 	now := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
 	svc, err := Open(context.Background(), Options{
 		Dir: h.dir, Version: "0.1.0", Now: func() time.Time { return now },
-		NewClient: func(d *wastore.Device) Client { return h.clients.New(d) },
+		NewClient: func(d *wastore.Device, l waLog.Logger) Client { return h.clients.New(d, l) },
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -315,7 +316,7 @@ func TestUnansweredPhoneRequestIsClosed(t *testing.T) {
 func TestSecondInstanceOnTheSameFolderIsRefused(t *testing.T) {
 	h := newHarness(t, true)
 	svc, err := Open(context.Background(), Options{Dir: h.dir, Version: "0.1.0",
-		NewClient: func(d *wastore.Device) Client { return watest.New(d) }})
+		NewClient: func(d *wastore.Device, l waLog.Logger) Client { return watest.New(d, l) }})
 	if err == nil {
 		svc.Close()
 		t.Fatal("a second service opened the same session.db: two copies of the keys would run")

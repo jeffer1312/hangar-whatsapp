@@ -23,6 +23,10 @@ hangar-whatsapp --data ~/.hangar/whatsapp --import ~/Projetos/whatsapp-arquivo/d
 roda com o destino sem `messages.db` e sem `session.db` e com o serviço parado. No fim renomeia o `sessao.db`
 de origem para `sessao.db.migrated`, para as mesmas chaves não rodarem em dois lugares.
 
+O log vai para stderr (num serviço systemd, `journalctl --user -u hangar-whatsapp`), com os avisos do
+whatsmeow e os eventos de conexão. Se o servidor não puser o aparelho em modo ativo depois do login, o serviço
+reconecta sozinho; essa detecção depende do texto do aviso do whatsmeow (ver [docs/api.md](docs/api.md)).
+
 ## Pasta de dados
 
 | Arquivo | O que é |

@@ -15,19 +15,22 @@ import (
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 )
 
 var OwnJID = types.NewJID("556411112222", types.DefaultUserServer)
 
 type Client struct {
-	mu        sync.Mutex
-	device    *wastore.Device
-	handlers  []whatsmeow.EventHandler
-	QR        chan whatsmeow.QRChannelItem
-	phones    []string
-	logouts   int
-	retries   int
+	mu       sync.Mutex
+	device   *wastore.Device
+	handlers []whatsmeow.EventHandler
+	QR       chan whatsmeow.QRChannelItem
+	phones   []string
+	logouts  int
+	connects int
+	log      waLog.Logger
+	retries  int
 	// Set before the event that triggers them: what DownloadToFile and SendMediaRetryReceipt return.
 	downloadErr, retryErr, logoutErr error
 }
@@ -44,8 +47,17 @@ func (f *Client) Retries() int {
 	return f.retries
 }
 
-func New(device *wastore.Device) *Client {
-	return &Client{device: device, QR: make(chan whatsmeow.QRChannelItem, 8)}
+// New takes the logger the service hands to whatsmeow, so a test can write what whatsmeow writes.
+func New(device *wastore.Device, log waLog.Logger) *Client {
+	return &Client{device: device, log: log, QR: make(chan whatsmeow.QRChannelItem, 8)}
+}
+
+func (f *Client) Log() waLog.Logger { return f.log }
+
+func (f *Client) Connects() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.connects
 }
 
 func (f *Client) Device() *wastore.Device { return f.device }
@@ -61,7 +73,12 @@ func (f *Client) GetQRChannel(ctx context.Context) (<-chan whatsmeow.QRChannelIt
 	return f.QR, nil
 }
 
-func (f *Client) ConnectContext(ctx context.Context) error { return nil }
+func (f *Client) ConnectContext(ctx context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.connects++
+	return nil
+}
 
 func (f *Client) Disconnect() {}
 
@@ -152,13 +169,13 @@ type Factory struct {
 
 func NewFactory(paired bool) *Factory { return &Factory{paired: paired} }
 
-func (f *Factory) New(d *wastore.Device) *Client {
+func (f *Factory) New(d *wastore.Device, log waLog.Logger) *Client {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.paired && len(f.clients) == 0 {
 		d.ID = &OwnJID
 	}
-	c := New(d)
+	c := New(d, log)
 	f.clients = append(f.clients, c)
 	return c
 }

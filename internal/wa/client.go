@@ -30,6 +30,6 @@ type realClient struct{ *whatsmeow.Client }
 
 func (c realClient) Device() *wastore.Device { return c.Store }
 
-func NewRealClient(device *wastore.Device) Client {
-	return realClient{whatsmeow.NewClient(device, waLog.Noop)}
+func NewRealClient(device *wastore.Device, log waLog.Logger) Client {
+	return realClient{whatsmeow.NewClient(device, log)}
 }

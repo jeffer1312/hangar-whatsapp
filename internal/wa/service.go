@@ -31,6 +31,10 @@ const pairWindow = 160 * time.Second
 
 const logoutTimeout = 10 * time.Second
 
+// reactivateEvery bounds reconnections when the server keeps refusing active mode: each one is a
+// new login on the account.
+const reactivateEvery = time.Minute
+
 // deviceName is how the phone lists this device; it follows the DeviceProps set in Open.
 const deviceName = "Google Chrome (Linux)"
 
@@ -60,10 +64,11 @@ var (
 var phoneDigits = regexp.MustCompile(`^[1-9][0-9]{7,14}$`)
 
 type Options struct {
-	Dir       string
-	Version   string
-	Now       func() time.Time
-	NewClient func(*wastore.Device) Client
+	Dir     string
+	Version string
+	Now     func() time.Time
+	// NewClient gets the logger whatsmeow must write to: the service watches some of its warnings.
+	NewClient func(*wastore.Device, waLog.Logger) Client
 	Log       *slog.Logger
 }
 
@@ -108,26 +113,27 @@ type Service struct {
 	rw sync.RWMutex
 	in *instance
 
-	mu         sync.Mutex
-	cli        Client
-	gen        int
-	state      string
-	errCode    string
-	qr, code   string
-	qrExp      time.Time
-	codeExp    time.Time
-	pairCancel context.CancelFunc
+	mu          sync.Mutex
+	cli         Client
+	gen         int
+	state       string
+	errCode     string
+	qr, code    string
+	qrExp       time.Time
+	codeExp     time.Time
+	pairCancel  context.CancelFunc
+	reactivated time.Time
 }
 
 func Open(ctx context.Context, opt Options) (*Service, error) {
 	if opt.Now == nil {
 		opt.Now = time.Now
 	}
-	if opt.NewClient == nil {
-		opt.NewClient = NewRealClient
-	}
 	if opt.Log == nil {
 		opt.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+	if opt.NewClient == nil {
+		opt.NewClient = NewRealClient
 	}
 	dir, err := filepath.Abs(opt.Dir)
 	if err != nil {
@@ -161,7 +167,7 @@ func (s *Service) start() (err error) {
 	if err != nil {
 		return err
 	}
-	container := sqlstore.NewWithDB(sessionDB, "sqlite3", waLog.Noop)
+	container := sqlstore.NewWithDB(sessionDB, "sqlite3", waLogger(s.opt.Log, "sessão", nil))
 	defer func() {
 		if err != nil {
 			container.Close()
@@ -238,10 +244,33 @@ func with[T any](s *Service, fn func(in *instance) (T, error)) (T, error) {
 func (s *Service) newClientLocked(in *instance, device *wastore.Device) (Client, int) {
 	s.gen++
 	g := s.gen
-	cli := s.opt.NewClient(device)
+	var cli Client
+	cli = s.opt.NewClient(device, waLogger(s.opt.Log, "whatsapp", func() { s.reactivate(in, g, cli) }))
 	cli.AddEventHandler(func(evt any) { s.event(in, g, cli, evt) })
 	s.cli = cli
 	return cli, g
+}
+
+// reactivate reconnects when the server was not told the device is active: the new login makes
+// whatsmeow ask again, and no new kind of outgoing call is needed.
+func (s *Service) reactivate(in *instance, g int, cli Client) {
+	// Under mu with the generation checked, so stop, which bumps it first, always waits for this.
+	s.update(g, func() {
+		if s.state != StateConnected {
+			return
+		}
+		now := s.now()
+		if now.Sub(s.reactivated) < reactivateEvery {
+			s.opt.Log.Error("o WhatsApp de novo não pôs o aparelho no modo ativo; sem reconectar outra vez antes de 1 min")
+			return
+		}
+		s.reactivated = now
+		s.opt.Log.Warn("o WhatsApp não pôs o aparelho no modo ativo, sem ele não chegam mensagens; reconectando")
+		in.wg.Go(func() {
+			cli.Disconnect()
+			s.connect(in.ctx, g, cli)
+		})
+	})
 }
 
 func (s *Service) resetLocked(state, errCode string) {
@@ -309,6 +338,18 @@ func (s *Service) connect(ctx context.Context, g int, cli Client) {
 
 func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	switch e := raw.(type) {
+	case *events.Connected:
+		s.opt.Log.Info("conectado ao WhatsApp")
+	case *events.Disconnected:
+		s.opt.Log.Warn("conexão com o WhatsApp caiu")
+	case *events.StreamReplaced:
+		s.opt.Log.Error("outro cliente abriu esta mesma sessão; este parou de receber")
+	case *events.TemporaryBan:
+		s.opt.Log.Error("o WhatsApp suspendeu esta conta por um tempo", "motivo", e.String())
+	case *events.ConnectFailure:
+		s.opt.Log.Error("o WhatsApp recusou a conexão", "motivo", e.Reason.String(), "mensagem", e.Message)
+	case *events.UndecryptableMessage:
+		s.opt.Log.Warn("mensagem não decifrada", "id", e.Info.ID, "conversa", e.Info.Chat.String())
 	case *events.LoggedOut:
 		s.opt.Log.Warn("o celular desconectou este aparelho", "motivo", e.Reason.String())
 		s.update(g, func() { s.resetLocked(StateLoggedOut, "") })
