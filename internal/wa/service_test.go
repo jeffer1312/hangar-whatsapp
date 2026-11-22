@@ -224,11 +224,15 @@ func TestWipeClosesAndDeletesThenStartsFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := h.client()
-	if err := h.svc.Wipe(context.Background()); err != nil {
+	logout, err := h.svc.Wipe(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if old.Logouts() != 1 {
-		t.Fatalf("wipe did not log out first (%d)", old.Logouts())
+	if old.Logouts() != 1 || logout != "done" {
+		t.Fatalf("wipe logout = %q after %d calls, want done after 1", logout, old.Logouts())
+	}
+	if logout, err := h.svc.Wipe(context.Background()); err != nil || logout != "not_paired" {
+		t.Fatalf("second wipe = %q, %v; want not_paired", logout, err)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir, "media")); !os.IsNotExist(err) {
 		t.Fatalf("media/ still there: %v", err)
@@ -239,6 +243,18 @@ func TestWipeClosesAndDeletesThenStartsFresh(t *testing.T) {
 	}
 	if err := h.svc.Pair(""); err != nil {
 		t.Fatalf("pair after wipe: %v", err)
+	}
+}
+
+func TestWipeSaysWhenThePhoneStillListsTheDevice(t *testing.T) {
+	h := newHarness(t, true)
+	h.client().FailLogout(errors.New("phone offline"))
+	logout, err := h.svc.Wipe(context.Background())
+	if err != nil || logout != "not_done" {
+		t.Fatalf("wipe with a failed logout = %q, %v; want not_done", logout, err)
+	}
+	if s := h.status(); s.State != "unpaired" {
+		t.Fatalf("data not wiped: state %s", s.State)
 	}
 }
 
@@ -258,7 +274,7 @@ func TestFailedWipeKeepsTheServiceAnswering(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.Chmod(locked, 0o700) })
-	if err := h.svc.Wipe(context.Background()); err == nil {
+	if _, err := h.svc.Wipe(context.Background()); err == nil {
 		t.Fatal("wipe with an undeletable file reported success")
 	}
 	s := h.status()
@@ -276,7 +292,8 @@ func TestFailedWipeKeepsTheServiceAnswering(t *testing.T) {
 func TestUnansweredPhoneRequestIsClosed(t *testing.T) {
 	h := newHarness(t, true)
 	c := h.client()
-	c.Fail(whatsmeow.ErrMediaDownloadFailedWith404, errors.New("phone offline"))
+	// The retry receipt goes out and the phone never answers.
+	c.Fail(whatsmeow.ErrMediaDownloadFailedWith404, nil)
 	evt := watest.Text("OLD1", "", msgAt)
 	evt.Message = &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Mimetype: proto.String("image/jpeg"), DirectPath: proto.String("/x")}}
 	c.Emit(evt)

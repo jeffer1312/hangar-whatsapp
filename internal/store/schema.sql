@@ -28,6 +28,9 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS messages_chat_at ON messages (chat, at);
 CREATE INDEX IF NOT EXISTS messages_at ON messages (at);
+-- Media still without a file: the downloader reads only these, every 30 s.
+CREATE INDEX IF NOT EXISTS messages_media_pending ON messages (at)
+	WHERE source = 'whatsapp' AND media IS NULL AND media_mime IS NOT NULL;
 
 -- One row per request to the phone; kept after done_at so the daily cap counts them.
 CREATE TABLE IF NOT EXISTS media_requests (

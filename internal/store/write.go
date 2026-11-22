@@ -42,7 +42,8 @@ func (d *DB) Contact(ctx context.Context, jid, name string, overwrite bool) erro
 	}
 	query := `INSERT INTO contacts (jid, name) VALUES (?, ?) ON CONFLICT (jid) DO NOTHING`
 	if overwrite {
-		query = `INSERT INTO contacts (jid, name) VALUES (?, ?) ON CONFLICT (jid) DO UPDATE SET name = excluded.name`
+		query = `INSERT INTO contacts (jid, name) VALUES (?, ?)
+			ON CONFLICT (jid) DO UPDATE SET name = excluded.name WHERE contacts.name <> excluded.name`
 	}
 	_, err := d.w.ExecContext(ctx, query, jid, name)
 	return err
@@ -63,7 +64,7 @@ func (d *DB) Pending(ctx context.Context, skip map[[2]string]bool, limit int) ([
 			FROM messages m
 			WHERE m.source = 'whatsapp' AND m.media IS NULL AND m.media_mime IS NOT NULL)
 		WHERE media_error IS NULL OR requested
-		ORDER BY requested DESC, at DESC`)
+		ORDER BY requested DESC, at DESC LIMIT ?`, limit+len(skip))
 	if err != nil {
 		return nil, err
 	}

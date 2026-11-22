@@ -42,6 +42,13 @@ const (
 	StateOutdated  = "outdated"
 )
 
+// What Wipe says about the phone: whether it still lists this device.
+const (
+	LogoutDone      = "done"
+	LogoutNotDone   = "not_done"
+	LogoutNotPaired = "not_paired"
+)
+
 var (
 	ErrNotPaired     = errors.New("not_paired")
 	ErrAlreadyPaired = errors.New("este aparelho já está pareado; desconecte antes de parear de novo")
@@ -95,6 +102,7 @@ type instance struct {
 type Service struct {
 	opt  Options
 	root context.Context
+	tz   string
 
 	// rw guards in: readers hold it shared, wipe and close hold it alone.
 	rw sync.RWMutex
@@ -130,7 +138,7 @@ func Open(ctx context.Context, opt Options) (*Service, error) {
 	wastore.DeviceProps.RequireFullSync = proto.Bool(true)
 	wastore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 	wastore.DeviceProps.Os = proto.String("Linux")
-	s := &Service{opt: opt, root: ctx}
+	s := &Service{opt: opt, root: ctx, tz: machineTZ()}
 	if err := s.start(); err != nil {
 		return nil, err
 	}
@@ -139,26 +147,31 @@ func Open(ctx context.Context, opt Options) (*Service, error) {
 
 func (s *Service) now() time.Time { return s.opt.Now().UTC() }
 
-func (s *Service) start() error {
+func (s *Service) start() (err error) {
 	db, err := store.Open(s.opt.Dir)
 	if err != nil {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			db.Close()
+		}
+	}()
 	sessionDB, err := store.OpenSession(store.SessionPath(s.opt.Dir))
 	if err != nil {
-		db.Close()
 		return err
 	}
 	container := sqlstore.NewWithDB(sessionDB, "sqlite3", waLog.Noop)
+	defer func() {
+		if err != nil {
+			container.Close()
+		}
+	}()
 	if err := container.Upgrade(s.root); err != nil {
-		container.Close()
-		db.Close()
 		return errors.New("session.db em uso por outro processo ou ilegível: " + err.Error())
 	}
 	device, err := container.GetFirstDevice(s.root)
 	if err != nil {
-		container.Close()
-		db.Close()
 		return err
 	}
 	in := &instance{db: db, container: container}
@@ -168,8 +181,7 @@ func (s *Service) start() error {
 	s.in = in
 
 	s.mu.Lock()
-	cli := s.newClientLocked(in, device)
-	g := s.gen
+	cli, g := s.newClientLocked(in, device)
 	s.resetLocked(StateUnpaired, "")
 	if device.ID != nil {
 		s.state = StateConnected
@@ -211,13 +223,25 @@ func (s *Service) Close() {
 	s.stop()
 }
 
-func (s *Service) newClientLocked(in *instance, device *wastore.Device) Client {
+// with runs fn on the open data folder, holding rw shared so a wipe waits for it. It is the only
+// way in: after a reopen that failed there is no folder, and fn never sees a nil instance.
+func with[T any](s *Service, fn func(in *instance) (T, error)) (T, error) {
+	s.rw.RLock()
+	defer s.rw.RUnlock()
+	if s.in == nil {
+		var zero T
+		return zero, ErrUnavailable
+	}
+	return fn(s.in)
+}
+
+func (s *Service) newClientLocked(in *instance, device *wastore.Device) (Client, int) {
 	s.gen++
 	g := s.gen
 	cli := s.opt.NewClient(device)
 	cli.AddEventHandler(func(evt any) { s.event(in, g, cli, evt) })
 	s.cli = cli
-	return cli
+	return cli, g
 }
 
 func (s *Service) resetLocked(state, errCode string) {
@@ -237,6 +261,8 @@ func (s *Service) update(g int, fn func()) bool {
 	return true
 }
 
+func (s *Service) current(g int) bool { return s.update(g, func() {}) }
+
 func (s *Service) connectedClient() Client {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -244,6 +270,20 @@ func (s *Service) connectedClient() Client {
 		return nil
 	}
 	return s.cli
+}
+
+// snapshot is the current client, its generation and state, read together.
+func (s *Service) snapshot() (Client, int, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cli, s.gen, s.state
+}
+
+// logout is bounded: a wipe waiting for rw would otherwise hold every request behind it.
+func logout(ctx context.Context, cli Client) error {
+	ctx, cancel := context.WithTimeout(ctx, logoutTimeout)
+	defer cancel()
+	return cli.Logout(ctx)
 }
 
 // connect retries the first connection; after it, whatsmeow reconnects by itself.
@@ -260,7 +300,7 @@ func (s *Service) connect(ctx context.Context, g int, cli Client) {
 			return
 		case <-time.After(delay):
 		}
-		if s.update(g, func() {}) == false {
+		if !s.current(g) {
 			return
 		}
 		delay = min(delay*2, 5*time.Minute)
@@ -278,8 +318,9 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	case *events.MediaRetry:
 		in.media.reply(e)
 	case *events.Message:
-		in.archive.message(cli, e, types.EmptyJID)
-		in.media.wake()
+		if in.archive.message(cli, e, types.EmptyJID) {
+			in.media.wake()
+		}
 	case *events.HistorySync:
 		in.archive.history(cli, e)
 		in.media.wake()
@@ -291,35 +332,31 @@ func (s *Service) Pair(phone string) error {
 	if phone != "" && !phoneDigits.MatchString(phone) {
 		return ErrBadPhone
 	}
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-	in, err := s.instance()
-	if err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	switch s.state {
-	case StateConnected:
-		return ErrAlreadyPaired
-	case StateOutdated:
-		return ErrOutdated
-	}
-	if s.pairCancel != nil {
-		s.pairCancel()
-	}
-	// Always a new device and client: after a logout or a QR timeout the old one is spent.
-	if old := s.cli; old != nil {
-		go old.Disconnect()
-	}
-	cli := s.newClientLocked(in, in.container.NewDevice())
-	g := s.gen
-	s.resetLocked(StatePairing, "")
-	ctx, cancel := context.WithCancel(in.ctx)
-	s.pairCancel = cancel
-	started := s.now()
-	in.wg.Go(func() { s.pair(ctx, g, cli, phone, started) })
-	return nil
+	_, err := with(s, func(in *instance) (struct{}, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		switch s.state {
+		case StateConnected:
+			return struct{}{}, ErrAlreadyPaired
+		case StateOutdated:
+			return struct{}{}, ErrOutdated
+		}
+		if s.pairCancel != nil {
+			s.pairCancel()
+		}
+		// Always a new device and client: after a logout or a QR timeout the old one is spent.
+		if old := s.cli; old != nil {
+			go old.Disconnect()
+		}
+		cli, g := s.newClientLocked(in, in.container.NewDevice())
+		s.resetLocked(StatePairing, "")
+		ctx, cancel := context.WithCancel(in.ctx)
+		s.pairCancel = cancel
+		started := s.now()
+		in.wg.Go(func() { s.pair(ctx, g, cli, phone, started) })
+		return struct{}{}, nil
+	})
+	return err
 }
 
 func (s *Service) pair(ctx context.Context, g int, cli Client, phone string, started time.Time) {
@@ -385,60 +422,43 @@ func (s *Service) pair(ctx context.Context, g int, cli Client, phone string, sta
 
 // Logout unlinks this device on the phone and keeps the data.
 func (s *Service) Logout(ctx context.Context) error {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-	s.mu.Lock()
-	cli, g, state := s.cli, s.gen, s.state
-	s.mu.Unlock()
-	if state != StateConnected || cli == nil {
-		return ErrNotPaired
-	}
-	// Bounded: a wipe waiting for rw would otherwise hold every other request behind this one.
-	lctx, cancel := context.WithTimeout(ctx, logoutTimeout)
-	defer cancel()
-	if err := cli.Logout(lctx); err != nil {
-		return err
-	}
-	s.update(g, func() { s.resetLocked(StateLoggedOut, "") })
-	return nil
+	_, err := with(s, func(*instance) (struct{}, error) {
+		cli, g, state := s.snapshot()
+		if state != StateConnected || cli == nil {
+			return struct{}{}, ErrNotPaired
+		}
+		if err := logout(ctx, cli); err != nil {
+			return struct{}{}, err
+		}
+		s.update(g, func() { s.resetLocked(StateLoggedOut, "") })
+		return struct{}{}, nil
+	})
+	return err
 }
 
 // Wipe logs out when it can, closes the databases and deletes messages.db, session.db and media/.
-func (s *Service) Wipe(ctx context.Context) error {
+// It says whether the phone was told (LogoutDone) or may still list this device (LogoutNotDone).
+func (s *Service) Wipe(ctx context.Context) (string, error) {
 	s.rw.Lock()
 	defer s.rw.Unlock()
-	s.mu.Lock()
-	cli, state := s.cli, s.state
-	s.mu.Unlock()
-	if state == StateConnected && cli != nil {
-		lctx, cancel := context.WithTimeout(ctx, logoutTimeout)
-		if err := cli.Logout(lctx); err != nil {
+	result := LogoutNotPaired
+	if cli, _, state := s.snapshot(); state == StateConnected && cli != nil {
+		result = LogoutDone
+		if err := logout(ctx, cli); err != nil {
 			s.opt.Log.Warn("desvincular antes de apagar", "erro", err)
+			result = LogoutNotDone
 		}
-		cancel()
 	}
 	s.stop()
 	// Reopens even when a delete failed: the service must keep answering, and what was left
 	// behind is reported.
-	var errs []error
-	for _, path := range []string{store.MessagesPath(s.opt.Dir), store.SessionPath(s.opt.Dir)} {
-		for _, suffix := range []string{"", "-wal", "-shm"} {
-			if err := os.Remove(path + suffix); err != nil && !errors.Is(err, os.ErrNotExist) {
-				errs = append(errs, err)
-			}
-		}
+	errs := []error{
+		store.RemoveDB(store.MessagesPath(s.opt.Dir)),
+		store.RemoveDB(store.SessionPath(s.opt.Dir)),
+		os.RemoveAll(filepath.Join(s.opt.Dir, "media")),
+		s.start(),
 	}
-	errs = append(errs, os.RemoveAll(filepath.Join(s.opt.Dir, "media")))
-	errs = append(errs, s.start())
-	return errors.Join(errs...)
-}
-
-// instance returns the open data folder; nil only after a reopen failed, which the log explains.
-func (s *Service) instance() (*instance, error) {
-	if s.in == nil {
-		return nil, ErrUnavailable
-	}
-	return s.in, nil
+	return result, errors.Join(errs...)
 }
 
 func optional(s string) *string {
@@ -463,86 +483,57 @@ func maskPhone(user string) string {
 }
 
 func (s *Service) Status(ctx context.Context) (Status, error) {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-	in, err := s.instance()
-	if err != nil {
-		return Status{}, err
-	}
-	sum, err := in.db.Totals(ctx)
-	if err != nil {
-		return Status{}, err
-	}
-	st := Status{API: API, Version: s.opt.Version, TZ: machineTZ(), Totals: sum.Totals,
-		Since: optional(sum.Since), LastMessageAt: optional(sum.LastMessageAt)}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st.State = s.state
-	if s.errCode != "" {
-		st.Error = &StatusError{Code: s.errCode}
-	}
-	if s.state == StateConnected && s.cli != nil {
-		if id := s.cli.Device().ID; id != nil {
-			st.Device = optional(maskPhone(id.User))
-			st.DeviceName = optional(deviceName)
+	return with(s, func(in *instance) (Status, error) {
+		sum, err := in.db.Totals(ctx)
+		if err != nil {
+			return Status{}, err
 		}
-	}
-	st.QR, st.QRExpiresAt = optional(s.qr), optionalTime(s.qrExp)
-	st.PairCode, st.PairCodeExpiresAt = optional(s.code), optionalTime(s.codeExp)
-	return st, nil
+		st := Status{API: API, Version: s.opt.Version, TZ: s.tz, Totals: sum.Totals,
+			Since: optional(sum.Since), LastMessageAt: optional(sum.LastMessageAt)}
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		st.State = s.state
+		if s.errCode != "" {
+			st.Error = &StatusError{Code: s.errCode}
+		}
+		if s.state == StateConnected && s.cli != nil {
+			if id := s.cli.Device().ID; id != nil {
+				st.Device = optional(maskPhone(id.User))
+				st.DeviceName = optional(deviceName)
+			}
+		}
+		st.QR, st.QRExpiresAt = optional(s.qr), optionalTime(s.qrExp)
+		st.PairCode, st.PairCodeExpiresAt = optional(s.code), optionalTime(s.codeExp)
+		return st, nil
+	})
 }
 
 func (s *Service) Chats(ctx context.Context, q string, limit int) ([]store.Chat, error) {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-	in, err := s.instance()
-	if err != nil {
-		return nil, err
-	}
-	return in.db.Chats(ctx, q, limit)
+	return with(s, func(in *instance) ([]store.Chat, error) { return in.db.Chats(ctx, q, limit) })
 }
 
 func (s *Service) Messages(ctx context.Context, q store.MessagesQuery) (store.MessagesPage, error) {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-	in, err := s.instance()
-	if err != nil {
-		return store.MessagesPage{}, err
-	}
-	return in.db.Messages(ctx, q)
+	return with(s, func(in *instance) (store.MessagesPage, error) { return in.db.Messages(ctx, q) })
 }
 
 func (s *Service) Search(ctx context.Context, q, chat string, limit int) ([]store.Message, error) {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-	in, err := s.instance()
-	if err != nil {
-		return nil, err
-	}
-	return in.db.Search(ctx, q, chat, limit)
+	return with(s, func(in *instance) ([]store.Message, error) { return in.db.Search(ctx, q, chat, limit) })
 }
 
 // RequestMedia marks old media for the phone to send; each one is a notification on the phone.
 func (s *Service) RequestMedia(ctx context.Context, chat, id, since string) (store.MediaRequest, error) {
-	s.rw.RLock()
-	defer s.rw.RUnlock()
-	s.mu.Lock()
-	state := s.state
-	s.mu.Unlock()
-	switch state {
-	case StateConnected:
-	case StateOutdated:
-		return store.MediaRequest{}, ErrOutdated
-	default:
-		return store.MediaRequest{}, ErrNotPaired
-	}
-	in, err := s.instance()
-	if err != nil {
-		return store.MediaRequest{}, err
-	}
-	r, err := in.db.RequestMedia(ctx, chat, id, since, s.now())
-	if err == nil && r.Requested > 0 {
-		in.media.wake()
-	}
-	return r, err
+	return with(s, func(in *instance) (store.MediaRequest, error) {
+		switch _, _, state := s.snapshot(); state {
+		case StateConnected:
+		case StateOutdated:
+			return store.MediaRequest{}, ErrOutdated
+		default:
+			return store.MediaRequest{}, ErrNotPaired
+		}
+		r, err := in.db.RequestMedia(ctx, chat, id, since, s.now())
+		if err == nil && r.Requested > 0 {
+			in.media.wake()
+		}
+		return r, err
+	})
 }

@@ -45,10 +45,11 @@ func ignored(chat types.JID) bool {
 }
 
 // message gets chat filled in from the history, where the contact's phone comes in the block.
-func (a *archiver) message(cli Client, e *events.Message, chat types.JID) {
+// It reports whether it saved a message with media, the only kind the downloader wants to hear of.
+func (a *archiver) message(cli Client, e *events.Message, chat types.JID) bool {
 	info := e.Info
 	if ignored(info.Chat) {
-		return
+		return false
 	}
 	if chat.IsEmpty() {
 		chat = a.normalize(cli, info.Chat)
@@ -59,16 +60,16 @@ func (a *archiver) message(cli Client, e *events.Message, chat types.JID) {
 				a.log.Error("gravar edição", "erro", err)
 			}
 		}
-		return
+		return false
 	}
 	c := contentOf(e.Message)
 	if c.kind == "" {
-		return
+		return false
 	}
 	msg, err := protojson.Marshal(e.Message)
 	if err != nil {
 		a.log.Error("serializar mensagem", "erro", err)
-		return
+		return false
 	}
 	raw, _ := json.Marshal(original{
 		Chat: info.Chat.String(), Sender: info.Sender.String(), FromMe: info.IsFromMe, Group: info.IsGroup, Message: msg,
@@ -80,11 +81,12 @@ func (a *archiver) message(cli Client, e *events.Message, chat types.JID) {
 	}
 	if err := a.db.Save(a.ctx, r); err != nil {
 		a.log.Error("gravar mensagem", "id", info.ID, "erro", err)
-		return
+		return false
 	}
 	if !info.IsFromMe && !info.IsGroup {
 		_ = a.db.Contact(a.ctx, r.Chat, info.PushName, false)
 	}
+	return c.media != nil
 }
 
 func (a *archiver) history(cli Client, e *events.HistorySync) {
@@ -131,10 +133,7 @@ func (a *archiver) addressBook(cli Client) {
 		return
 	}
 	for jid, info := range book {
-		if name := cmp.Or(info.FullName, info.FirstName, info.BusinessName); name != "" {
-			_ = a.db.Contact(a.ctx, a.normalize(cli, jid).String(), name, true)
-		} else {
-			_ = a.db.Contact(a.ctx, a.normalize(cli, jid).String(), info.PushName, false)
-		}
+		name := cmp.Or(info.FullName, info.FirstName, info.BusinessName)
+		_ = a.db.Contact(a.ctx, a.normalize(cli, jid).String(), cmp.Or(name, info.PushName), name != "")
 	}
 }

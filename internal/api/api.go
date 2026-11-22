@@ -39,14 +39,22 @@ func New(svc *wa.Service, key []byte, now func() time.Time, log *slog.Logger) ht
 	}
 	s := &server{svc: svc, key: key, now: now, log: log}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /v1/status", s.status)
-	mux.HandleFunc("POST /v1/pair", s.pair)
-	mux.HandleFunc("POST /v1/logout", s.logout)
-	mux.HandleFunc("POST /v1/wipe", s.wipe)
-	mux.HandleFunc("GET /v1/chats", s.chats)
-	mux.HandleFunc("GET /v1/messages", s.messages)
-	mux.HandleFunc("GET /v1/search", s.search)
-	mux.HandleFunc("POST /v1/media/request", s.mediaRequest)
+	for pattern, h := range map[string]func(http.ResponseWriter, *http.Request) error{
+		"GET /v1/status":         s.status,
+		"POST /v1/pair":          s.pair,
+		"POST /v1/logout":        s.logout,
+		"POST /v1/wipe":          s.wipe,
+		"GET /v1/chats":          s.chats,
+		"GET /v1/messages":       s.messages,
+		"GET /v1/search":         s.search,
+		"POST /v1/media/request": s.mediaRequest,
+	} {
+		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
+			if err := h(w, r); err != nil {
+				s.fail(w, err)
+			}
+		})
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "bad_request", "rota desconhecida")
 	})
@@ -136,6 +144,9 @@ func (s *server) fail(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusServiceUnavailable, "busy", "a consulta passou de 5 s; restrinja a conversa, o período ou o limite")
 	case errors.Is(err, store.ErrRateLimited):
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "limite de 200 pedidos de mídia em 24 h atingido")
+	case errors.Is(err, wa.ErrUnavailable):
+		s.log.Error("pedido sem pasta de dados", "erro", err)
+		writeError(w, http.StatusInternalServerError, "internal", err.Error())
 	default:
 		s.log.Error("pedido falhou", "erro", err)
 		writeError(w, http.StatusInternalServerError, "internal", "falha interna do hangar-whatsapp; veja o log do serviço")
@@ -195,101 +206,99 @@ func moment(name, v string, upper bool) (string, error) {
 	return t.Format(store.TimeLayout), nil
 }
 
-func (s *server) status(w http.ResponseWriter, r *http.Request) {
+// Handlers return their error; the adapter in New answers it in the error format.
+
+func (s *server) status(w http.ResponseWriter, r *http.Request) error {
 	st, err := s.svc.Status(r.Context())
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	writeJSON(w, http.StatusOK, st)
+	return nil
 }
 
-func (s *server) pair(w http.ResponseWriter, r *http.Request) {
+func (s *server) pair(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		Phone string `json:"phone"`
 	}
 	if err := decode(r, &in); err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	if err := s.svc.Pair(in.Phone); err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	w.WriteHeader(http.StatusAccepted)
+	return nil
 }
 
-func (s *server) logout(w http.ResponseWriter, r *http.Request) {
+func (s *server) logout(w http.ResponseWriter, r *http.Request) error {
 	if err := s.svc.Logout(r.Context()); err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	w.WriteHeader(http.StatusNoContent)
+	return nil
 }
 
-func (s *server) wipe(w http.ResponseWriter, r *http.Request) {
+func (s *server) wipe(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		Confirm bool `json:"confirm"`
 	}
 	if err := decode(r, &in); err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	if !in.Confirm {
-		s.fail(w, badRequest(`apagar exige {"confirm":true}`))
-		return
+		return badRequest(`apagar exige {"confirm":true}`)
 	}
-	if err := s.svc.Wipe(r.Context()); err != nil {
-		s.fail(w, err)
-		return
+	logout, err := s.svc.Wipe(r.Context())
+	if err != nil {
+		return err
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, http.StatusOK, map[string]string{"logout": logout})
+	return nil
 }
 
-func (s *server) chats(w http.ResponseWriter, r *http.Request) {
+func (s *server) chats(w http.ResponseWriter, r *http.Request) error {
 	n, err := limit(r)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	chats, err := s.svc.Chats(r.Context(), r.URL.Query().Get("q"), n)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"chats": chats})
+	return nil
 }
 
-func (s *server) messages(w http.ResponseWriter, r *http.Request) {
+func (s *server) messages(w http.ResponseWriter, r *http.Request) error {
 	q := r.URL.Query()
-	var in store.MessagesQuery
+	in := store.MessagesQuery{BeforeID: q.Get("before_id")}
 	var err error
-	if in.Chat, err = chatJID(q.Get("chat")); err == nil {
-		if in.Since, err = moment("since", q.Get("since"), false); err == nil {
-			if in.Until, err = moment("until", q.Get("until"), true); err == nil {
-				in.Limit, err = limit(r)
-			}
-		}
+	if in.Chat, err = chatJID(q.Get("chat")); err != nil {
+		return err
 	}
-	if err != nil {
-		s.fail(w, err)
-		return
+	if in.Since, err = moment("since", q.Get("since"), false); err != nil {
+		return err
 	}
-	in.BeforeID = q.Get("before_id")
+	if in.Until, err = moment("until", q.Get("until"), true); err != nil {
+		return err
+	}
+	if in.Limit, err = limit(r); err != nil {
+		return err
+	}
 	page, err := s.svc.Messages(r.Context(), in)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	writeJSON(w, http.StatusOK, page)
+	return nil
 }
 
-func (s *server) search(w http.ResponseWriter, r *http.Request) {
+func (s *server) search(w http.ResponseWriter, r *http.Request) error {
 	q := r.URL.Query()
 	text := strings.TrimSpace(q.Get("q"))
 	if text == "" {
-		s.fail(w, badRequest("q é obrigatório"))
-		return
+		return badRequest("q é obrigatório")
 	}
 	chat := ""
 	if q.Get("chat") != "" {
@@ -297,38 +306,37 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) {
 	}
 	n, err := limit(r)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	found, err := s.svc.Search(r.Context(), text, chat, n)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messages": found})
+	return nil
 }
 
-func (s *server) mediaRequest(w http.ResponseWriter, r *http.Request) {
+func (s *server) mediaRequest(w http.ResponseWriter, r *http.Request) error {
 	var in struct {
 		Chat  string `json:"chat"`
 		ID    string `json:"id"`
 		Since string `json:"since"`
 	}
-	err := decode(r, &in)
-	var chat, since string
-	if err == nil {
-		if chat, err = chatJID(in.Chat); err == nil {
-			since, err = moment("since", in.Since, false)
-		}
+	if err := decode(r, &in); err != nil {
+		return err
 	}
+	chat, err := chatJID(in.Chat)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
+	}
+	since, err := moment("since", in.Since, false)
+	if err != nil {
+		return err
 	}
 	res, err := s.svc.RequestMedia(r.Context(), chat, in.ID, since)
 	if err != nil {
-		s.fail(w, err)
-		return
+		return err
 	}
 	writeJSON(w, http.StatusOK, res)
+	return nil
 }

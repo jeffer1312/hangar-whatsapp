@@ -7,6 +7,8 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -102,10 +104,16 @@ func migrate(w *sql.DB) error {
 }
 
 func (d *DB) Close() error {
+	return errors.Join(d.r.Close(), d.w.Close())
+}
+
+// RemoveDB deletes a SQLite file with its -wal and -shm; a missing file is not an error.
+func RemoveDB(path string) error {
 	var errs []error
-	if d.r != nil {
-		errs = append(errs, d.r.Close())
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, err)
+		}
 	}
-	errs = append(errs, d.w.Close())
 	return errors.Join(errs...)
 }

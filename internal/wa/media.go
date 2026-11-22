@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -75,13 +76,8 @@ func (m *media) run(ctx context.Context) {
 		var list []store.Pending
 		if m.client() != nil {
 			m.mu.Lock()
-			skip := map[[2]string]bool{}
-			for k := range m.inFlight {
-				skip[k] = true
-			}
-			for k := range m.postponed {
-				skip[k] = true
-			}
+			skip := maps.Clone(m.inFlight)
+			maps.Copy(skip, m.postponed)
 			m.mu.Unlock()
 			var err error
 			list, err = m.db.Pending(ctx, skip, 50)
@@ -118,7 +114,6 @@ func (m *media) download(ctx context.Context, p store.Pending) {
 	if cli == nil {
 		return
 	}
-	key := [2]string{p.Chat, p.ID}
 	target, info, ext, err := m.read(p)
 	if err != nil {
 		m.log.Warn("referência de mídia ilegível", "id", p.ID, "erro", err)
@@ -127,11 +122,9 @@ func (m *media) download(ctx context.Context, p store.Pending) {
 	}
 	rel := store.MediaRel(p.Chat, p.ID, ext)
 	err = m.save(ctx, cli, target, rel)
-	asked := false
 	if expired(err) && p.Requested {
-		asked = true
 		// Old media leaves the WhatsApp server; the phone, if it still has the file, uploads it again.
-		target, err = m.askPhone(ctx, cli, info, target)
+		target, err = m.askPhone(ctx, cli, p, info, target)
 		if err == nil {
 			err = m.save(ctx, cli, target, rel)
 		}
@@ -147,16 +140,10 @@ func (m *media) download(ctx context.Context, p store.Pending) {
 		m.lost(ctx, p, "phone_refused")
 	case expired(err):
 		m.lost(ctx, p, "expired")
-	case asked:
-		// Left open, every restart would notify the phone again outside the daily cap.
-		m.log.Warn("o celular não atendeu o pedido de mídia; peça de novo se precisar", "id", p.ID, "erro", err)
-		if err := m.db.CloseRequest(ctx, p.Chat, p.ID, m.now()); err != nil {
-			m.log.Error("fechar pedido de mídia", "erro", err)
-		}
 	default:
 		m.log.Warn("mídia adiada para a próxima execução", "id", p.ID, "erro", err)
 		m.mu.Lock()
-		m.postponed[key] = true
+		m.postponed[[2]string{p.Chat, p.ID}] = true
 		m.mu.Unlock()
 	}
 }
@@ -229,7 +216,7 @@ func expired(err error) bool {
 		errors.Is(err, whatsmeow.ErrMediaDownloadFailedWith410)
 }
 
-func (m *media) askPhone(ctx context.Context, cli Client, info *types.MessageInfo, target whatsmeow.DownloadableMessage) (whatsmeow.DownloadableMessage, error) {
+func (m *media) askPhone(ctx context.Context, cli Client, p store.Pending, info *types.MessageInfo, target whatsmeow.DownloadableMessage) (whatsmeow.DownloadableMessage, error) {
 	reply := make(chan *events.MediaRetry, 1)
 	// Registered before asking: the reply can arrive before the send returns.
 	m.mu.Lock()
@@ -242,6 +229,11 @@ func (m *media) askPhone(ctx context.Context, cli Client, info *types.MessageInf
 	}()
 	if err := cli.SendMediaRetryReceipt(ctx, info, target.GetMediaKey()); err != nil {
 		return nil, fmt.Errorf("pedir mídia ao celular: %w", err)
+	}
+	// The phone got its notification: the request is spent whatever comes back. Left open, every
+	// restart would notify the phone again outside the daily cap.
+	if err := m.db.CloseRequest(ctx, p.Chat, p.ID, m.now()); err != nil {
+		m.log.Error("fechar pedido de mídia", "erro", err)
 	}
 	var e *events.MediaRetry
 	select {

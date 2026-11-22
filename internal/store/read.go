@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -157,9 +158,7 @@ func (d *DB) Messages(ctx context.Context, q MessagesQuery) (MessagesPage, error
 			page.More = true
 			list = list[:q.Limit]
 		}
-		for i, j := 0, len(list)-1; i < j; i, j = i+1, j-1 {
-			list[i], list[j] = list[j], list[i]
-		}
+		slices.Reverse(list)
 		for i := range list {
 			list[i].Chat = ""
 		}

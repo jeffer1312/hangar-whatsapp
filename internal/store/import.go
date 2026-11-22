@@ -39,11 +39,8 @@ func Import(src, dst string) (err error) {
 	defer func() {
 		// A failed import leaves dst as it was, so it can run again.
 		if err != nil {
-			for _, path := range []string{MessagesPath(dst), SessionPath(dst)} {
-				for _, suffix := range []string{"", "-wal", "-shm"} {
-					os.Remove(path + suffix)
-				}
-			}
+			RemoveDB(MessagesPath(dst))
+			RemoveDB(SessionPath(dst))
 			if createdMedia {
 				os.RemoveAll(filepath.Join(dst, "media"))
 			}

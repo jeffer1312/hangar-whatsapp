@@ -216,7 +216,7 @@ func TestPairLogoutWipe(t *testing.T) {
 	if r := e.do("POST", "/v1/wipe", `{}`); r.status != 400 || r.code(t) != "bad_request" {
 		t.Fatalf("wipe without confirm = %d %s", r.status, r.body)
 	}
-	if r := e.do("POST", "/v1/wipe", `{"confirm":true}`); r.status != 204 {
+	if r := e.do("POST", "/v1/wipe", `{"confirm":true}`); r.status != 200 || r.json(t)["logout"] != "not_paired" {
 		t.Fatalf("wipe = %d %s", r.status, r.body)
 	}
 }

@@ -42,13 +42,16 @@ no pedido.
 | `GET /v1/status` | 200 | |
 | `POST /v1/pair` `{"phone"?}` | 202, corpo vazio | 400 telefone inválido; 409 `bad_request` já pareado; 409 `outdated` |
 | `POST /v1/logout` | 204 | 409 `not_paired` |
-| `POST /v1/wipe` `{"confirm":true}` | 204 | 400 sem `confirm` |
+| `POST /v1/wipe` `{"confirm":true}` | 200 `{"logout":"done"\|"not_done"\|"not_paired"}` | 400 sem `confirm`; 500 `internal` se algo não pôde ser apagado (o serviço reabre e segue respondendo) |
 | `GET /v1/chats?q&limit` | 200 `{"chats":[…]}` | |
 | `GET /v1/messages?chat&since&until&before_id&limit` | 200 | 400 sem `chat`, `before_id` inexistente |
 | `GET /v1/search?q&chat&limit` | 200 `{"messages":[…]}` | 400 sem `q` |
 | `POST /v1/media/request` `{"chat","id"?,"since"?}` | 200 `{"requested","remaining_today","capped"}` | 409 `not_paired`/`outdated`; 429 `rate_limited` |
 
 Parâmetros:
+- `wipe.logout`: `done` (o celular foi avisado), `not_done` (o logout falhou, por exemplo sem rede: o aparelho
+  pode continuar listado no celular e é preciso desvincular lá), `not_paired` (não havia aparelho). Os dados
+  são apagados nos três casos.
 - `chat` aceita o JID ou só o número com DDI (`5564999999999` vira `5564999999999@s.whatsapp.net`).
 - `since`/`until`: ISO 8601 com fuso, ou data `AAAA-MM-DD` (UTC; em `until` vale até 23:59:59).
 - `limit`: padrão 50, acima de 200 vira 200, menor que 1 é 400.

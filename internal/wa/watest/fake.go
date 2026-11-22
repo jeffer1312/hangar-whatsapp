@@ -27,10 +27,9 @@ type Client struct {
 	QR        chan whatsmeow.QRChannelItem
 	phones    []string
 	logouts   int
-	downloads int
 	retries   int
 	// Set before the event that triggers them: what DownloadToFile and SendMediaRetryReceipt return.
-	downloadErr, retryErr error
+	downloadErr, retryErr, logoutErr error
 }
 
 func (f *Client) Fail(download, retry error) {
@@ -77,7 +76,13 @@ func (f *Client) Logout(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.logouts++
-	return nil
+	return f.logoutErr
+}
+
+func (f *Client) FailLogout(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logoutErr = err
 }
 
 func (f *Client) ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error) {
@@ -86,7 +91,6 @@ func (f *Client) ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*ev
 
 func (f *Client) DownloadToFile(ctx context.Context, msg whatsmeow.DownloadableMessage, file whatsmeow.File) error {
 	f.mu.Lock()
-	f.downloads++
 	err := f.downloadErr
 	f.mu.Unlock()
 	if err != nil {
