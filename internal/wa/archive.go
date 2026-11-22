@@ -45,11 +45,12 @@ func ignored(chat types.JID) bool {
 }
 
 // message gets chat filled in from the history, where the contact's phone comes in the block.
-// It reports whether it saved a message with media, the only kind the downloader wants to hear of.
-func (a *archiver) message(cli Client, e *events.Message, chat types.JID) bool {
+// It reports whether it saved a message with media, the only kind the downloader wants to hear of,
+// and false with failed when a message that should be kept was not saved (already logged).
+func (a *archiver) message(cli Client, e *events.Message, chat types.JID) (media, failed bool) {
 	info := e.Info
 	if ignored(info.Chat) {
-		return false
+		return false, false
 	}
 	if chat.IsEmpty() {
 		chat = a.normalize(cli, info.Chat)
@@ -58,18 +59,19 @@ func (a *archiver) message(cli Client, e *events.Message, chat types.JID) bool {
 		if pm.GetType() == waE2E.ProtocolMessage_MESSAGE_EDIT {
 			if err := a.db.Edit(a.ctx, chat.String(), pm.GetKey().GetID(), contentOf(pm.GetEditedMessage()).text); err != nil {
 				a.log.Error("gravar edição", "erro", err)
+				return false, true
 			}
 		}
-		return false
+		return false, false
 	}
 	c := contentOf(e.Message)
 	if c.kind == "" {
-		return false
+		return false, false
 	}
 	msg, err := protojson.Marshal(e.Message)
 	if err != nil {
 		a.log.Error("serializar mensagem", "erro", err)
-		return false
+		return false, true
 	}
 	raw, _ := json.Marshal(original{
 		Chat: info.Chat.String(), Sender: info.Sender.String(), FromMe: info.IsFromMe, Group: info.IsGroup, Message: msg,
@@ -81,16 +83,16 @@ func (a *archiver) message(cli Client, e *events.Message, chat types.JID) bool {
 	}
 	if err := a.db.Save(a.ctx, r); err != nil {
 		a.log.Error("gravar mensagem", "id", info.ID, "erro", err)
-		return false
+		return false, true
 	}
 	if !info.IsFromMe && !info.IsGroup {
 		_ = a.db.Contact(a.ctx, r.Chat, info.PushName, false)
 	}
-	return c.media != nil
+	return c.media != nil, false
 }
 
 func (a *archiver) history(cli Client, e *events.HistorySync) {
-	total := 0
+	total, failures := 0, 0
 	for _, conv := range e.Data.GetConversations() {
 		jid, err := types.ParseJID(conv.GetID())
 		if err != nil || ignored(jid) {
@@ -113,12 +115,20 @@ func (a *archiver) history(cli Client, e *events.HistorySync) {
 				a.log.Warn("mensagem do histórico ilegível", "erro", err)
 				continue
 			}
-			a.message(cli, evt, chat)
-			total++
+			if _, failed := a.message(cli, evt, chat); failed {
+				failures++
+			} else {
+				total++
+			}
 		}
 	}
 	a.addressBook(cli)
-	a.log.Info("bloco do histórico gravado", "tipo", e.Data.GetSyncType().String(), "progresso", e.Data.GetProgress(), "mensagens", total)
+	log := a.log.Info
+	if failures > 0 {
+		log = a.log.Error
+	}
+	log("bloco do histórico gravado", "tipo", e.Data.GetSyncType().String(), "progresso", e.Data.GetProgress(),
+		"mensagens", total, "falhas", failures)
 }
 
 // The phone's address book comes apart; its name wins over the name the person gave themselves.

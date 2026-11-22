@@ -318,7 +318,7 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	case *events.MediaRetry:
 		in.media.reply(e)
 	case *events.Message:
-		if in.archive.message(cli, e, types.EmptyJID) {
+		if media, _ := in.archive.message(cli, e, types.EmptyJID); media {
 			in.media.wake()
 		}
 	case *events.HistorySync:

@@ -192,8 +192,10 @@ func TestSearchAndChats(t *testing.T) {
 	if chat := r.json(t)["messages"].([]any)[0].(map[string]any)["chat"]; chat != "556499990000@s.whatsapp.net" {
 		t.Fatalf("search item chat = %v", chat)
 	}
-	if r := e.do("GET", "/v1/search", ""); r.status != 400 || r.code(t) != "bad_request" {
-		t.Fatalf("search without q = %d %s", r.status, r.body)
+	for _, uri := range []string{"/v1/search", "/v1/search?q=boleto&chat=%20"} {
+		if r := e.do("GET", uri, ""); r.status != 400 || r.code(t) != "bad_request" {
+			t.Fatalf("%s = %d %s", uri, r.status, r.body)
+		}
 	}
 	r = e.do("GET", "/v1/chats?q=mari&limit=500", "")
 	chats := r.json(t)["chats"].([]any)

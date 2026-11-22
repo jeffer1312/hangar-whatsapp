@@ -301,8 +301,11 @@ func (s *server) search(w http.ResponseWriter, r *http.Request) error {
 		return badRequest("q é obrigatório")
 	}
 	chat := ""
-	if q.Get("chat") != "" {
-		chat, _ = chatJID(q.Get("chat"))
+	if v := q.Get("chat"); v != "" {
+		var err error
+		if chat, err = chatJID(v); err != nil {
+			return err
+		}
 	}
 	n, err := limit(r)
 	if err != nil {
