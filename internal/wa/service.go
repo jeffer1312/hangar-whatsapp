@@ -123,7 +123,9 @@ type Service struct {
 	codeExp    time.Time
 	pairCancel context.CancelFunc
 	// The first reconnection is right away; reactivateWait is the wait before the next one.
+	// After a quiet stretch of 2×reactivateMaxWait it starts over.
 	reactivateBase, reactivateWait time.Duration
+	reactivatedAt                  time.Time
 }
 
 func Open(ctx context.Context, opt Options) (*Service, error) {
@@ -261,6 +263,11 @@ func (s *Service) reactivate(in *instance, g int, cli Client) {
 			s.opt.Log.Warn("o WhatsApp não pôs o aparelho no modo ativo, mas ele já saiu; sem reconectar", "estado", s.state)
 			return
 		}
+		now := s.now()
+		if now.Sub(s.reactivatedAt) > 2*reactivateMaxWait {
+			s.reactivateWait = 0
+		}
+		s.reactivatedAt = now
 		wait := s.reactivateWait
 		s.reactivateWait = min(max(2*wait, s.reactivateBase), reactivateMaxWait)
 		s.opt.Log.Error("o WhatsApp não pôs o aparelho no modo ativo, sem ele não chegam mensagens; reconectando",
@@ -276,7 +283,7 @@ func (s *Service) reactivate(in *instance, g int, cli Client) {
 			}
 			cli.Disconnect()
 			s.connect(in.ctx, g, cli)
-			if in.ctx.Err() == nil {
+			if in.ctx.Err() == nil && s.current(g) {
 				s.opt.Log.Info("reconectado ao WhatsApp; o whatsmeow repete o pedido de modo ativo")
 			}
 		})

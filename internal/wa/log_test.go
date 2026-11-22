@@ -83,9 +83,13 @@ func TestConnectionEventsAreLogged(t *testing.T) {
 // The text is whatsmeow's own (connectionevents.go, handleConnectSuccess): the trigger depends on it.
 func TestFailedActiveModeReconnects(t *testing.T) {
 	var out syncBuffer
+	var clockMu sync.Mutex
+	clock := time.Date(2026, 11, 22, 12, 0, 0, 0, time.UTC)
+	advance := func(d time.Duration) { clockMu.Lock(); clock = clock.Add(d); clockMu.Unlock() }
 	clients := watest.NewFactory(true)
 	svc, err := Open(context.Background(), Options{Dir: t.TempDir(), Version: "0.1.0",
 		Log:       slog.New(slog.NewTextHandler(&out, nil)),
+		Now:       func() time.Time { clockMu.Lock(); defer clockMu.Unlock(); return clock },
 		NewClient: func(d *wastore.Device, l waLog.Logger) Client { return clients.New(d, l) }})
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +117,13 @@ func TestFailedActiveModeReconnects(t *testing.T) {
 	}
 	watest.WaitFor(t, "the delayed reconnection", func() bool { return c.Connects() == 3 })
 	watest.WaitFor(t, "the reconnection logged", func() bool { return strings.Contains(out.String(), "reconectado ao WhatsApp") })
+	// Long after the last one, a new failure is a fresh case and reconnects right away again.
+	advance(2 * time.Hour)
+	c.Log().Warnf("Failed to send post-connect passive IQ: %v", "timed out")
+	watest.WaitFor(t, "the fresh reconnection", func() bool { return c.Connects() == 4 })
+	if n := strings.Count(out.String(), "em=0s"); n != 2 {
+		t.Fatalf("%d immediate reconnections, want 2 (first ever and the fresh one):\n%s", n, out.String())
+	}
 }
 
 func TestFailedActiveModeAfterLogoutDoesNotReconnect(t *testing.T) {
