@@ -95,8 +95,8 @@ outros.
 - `--version` imprime `hangar-whatsapp <versão> (api <n>)`.
 - Só leitura quer dizer que nenhuma mensagem é enviada. O whatsmeow manda sozinho os recibos de entrega
   (os mesmos que o celular já manda) e nenhum recibo de leitura. Fora o login, o logout (`logout`,
-  `wipe`) e as reconexões, a única chamada de saída do serviço é o pedido de reenvio de mídia ao celular
-  (`POST /v1/media/request`).
+  `wipe`), as reconexões e o download de mídia da CDN do WhatsApp, a única chamada de saída do serviço é o
+  pedido de reenvio de mídia ao celular (`POST /v1/media/request`).
 - O log sai em stderr, no formato texto do `slog`. Ele traz os avisos e erros do whatsmeow (`módulo=whatsapp`
   ou `módulo=sessão`) e os eventos de conexão: conectado, queda, sessão aberta em outro cliente,
   suspensão, conexão recusada e mensagem não decifrada.
