@@ -31,6 +31,9 @@ const pairWindow = 160 * time.Second
 
 const logoutTimeout = 10 * time.Second
 
+// deviceName is how the phone lists this device; it follows the DeviceProps set in Open.
+const deviceName = "Google Chrome (Linux)"
+
 const (
 	StateUnpaired  = "unpaired"
 	StatePairing   = "pairing"
@@ -67,6 +70,7 @@ type Status struct {
 	State             string       `json:"state"`
 	Error             *StatusError `json:"error"`
 	Device            *string      `json:"device"`
+	DeviceName        *string      `json:"device_name"`
 	QR                *string      `json:"qr"`
 	QRExpiresAt       *string      `json:"qr_expires_at"`
 	PairCode          *string      `json:"pair_code"`
@@ -480,6 +484,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 	if s.state == StateConnected && s.cli != nil {
 		if id := s.cli.Device().ID; id != nil {
 			st.Device = optional(maskPhone(id.User))
+			st.DeviceName = optional(deviceName)
 		}
 	}
 	st.QR, st.QRExpiresAt = optional(s.qr), optionalTime(s.qrExp)

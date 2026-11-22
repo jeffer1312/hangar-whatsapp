@@ -43,3 +43,7 @@ go vet ./...
 ```
 
 Os testes usam um dublê do whatsmeow (`internal/wa/watest`) e bancos temporários; nenhum pareia um número.
+
+## Licença
+
+[MPL-2.0](LICENSE), a mesma do whatsmeow.

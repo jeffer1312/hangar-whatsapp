@@ -67,7 +67,7 @@ func str(p *string) string {
 
 func TestStartsUnpairedAndPairShowsTheQR(t *testing.T) {
 	h := newHarness(t, false)
-	if s := h.status(); s.State != "unpaired" || s.QR != nil || s.API != 1 || s.Version != "0.1.0" || s.TZ == "" {
+	if s := h.status(); s.State != "unpaired" || s.QR != nil || s.DeviceName != nil || s.API != 1 || s.Version != "0.1.0" || s.TZ == "" {
 		t.Fatalf("fresh status = %+v", s)
 	}
 	if err := h.svc.Pair(""); err != nil {
@@ -130,8 +130,8 @@ func TestPairSuccessConnects(t *testing.T) {
 	c.Device().ID = &watest.OwnJID
 	c.QR <- whatsmeow.QRChannelSuccess
 	watest.WaitFor(t, "connected", func() bool { return h.status().State == "connected" })
-	if s := h.status(); str(s.Device) != "+5564••••2222" || s.QR != nil {
-		t.Fatalf("connected status = device %s qr %s", str(s.Device), str(s.QR))
+	if s := h.status(); str(s.Device) != "+5564••••2222" || str(s.DeviceName) != "Google Chrome (Linux)" || s.QR != nil {
+		t.Fatalf("connected status = device %s device_name %s qr %s", str(s.Device), str(s.DeviceName), str(s.QR))
 	}
 	if err := h.svc.Pair(""); !errors.Is(err, ErrAlreadyPaired) {
 		t.Fatalf("pair while connected = %v, want ErrAlreadyPaired", err)

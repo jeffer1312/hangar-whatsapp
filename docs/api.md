@@ -65,6 +65,9 @@ Erro: `{"detail":{"code","msg"}}`. Além dos códigos do contrato (`unauthorized
 - `logged_out`: o celular desvinculou ou houve `logout`; dados mantidos;
 - `outdated`: o WhatsApp recusou a versão.
 
+`device` (número mascarado, `+5564••••2222`) e `device_name` (como o celular lista o aparelho, `Google
+Chrome (Linux)`) só vêm em `connected`; nos outros estados são null.
+
 `error.code` depois de um pareamento que não fechou (volta a `unpaired`): `pair_timeout` (QR esgotado),
 `connect_failed`, `pair_code_failed`, `pair_failed`. Um novo `pair` recria o cliente.
 

@@ -126,7 +126,7 @@ func TestStatusIsSigned(t *testing.T) {
 	if r.status != 200 || m["api"] != 1.0 || m["state"] != "unpaired" || m["version"] != "0.1.0" {
 		t.Fatalf("status = %d %s", r.status, r.body)
 	}
-	for _, k := range []string{"error", "device", "qr", "qr_expires_at", "pair_code", "pair_code_expires_at", "tz", "totals", "since", "last_message_at"} {
+	for _, k := range []string{"error", "device", "device_name", "qr", "qr_expires_at", "pair_code", "pair_code_expires_at", "tz", "totals", "since", "last_message_at"} {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("status without %q: %s", k, r.body)
 		}
