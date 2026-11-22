@@ -31,9 +31,9 @@ const pairWindow = 160 * time.Second
 
 const logoutTimeout = 10 * time.Second
 
-// reactivateEvery bounds reconnections when the server keeps refusing active mode: each one is a
-// new login on the account.
-const reactivateEvery = time.Minute
+// A server that keeps refusing active mode gets reconnections spaced out from one minute doubling up
+// to this: each one is a new login on the account.
+const reactivateMaxWait = 30 * time.Minute
 
 // deviceName is how the phone lists this device; it follows the DeviceProps set in Open.
 const deviceName = "Google Chrome (Linux)"
@@ -113,16 +113,17 @@ type Service struct {
 	rw sync.RWMutex
 	in *instance
 
-	mu          sync.Mutex
-	cli         Client
-	gen         int
-	state       string
-	errCode     string
-	qr, code    string
-	qrExp       time.Time
-	codeExp     time.Time
-	pairCancel  context.CancelFunc
-	reactivated time.Time
+	mu         sync.Mutex
+	cli        Client
+	gen        int
+	state      string
+	errCode    string
+	qr, code   string
+	qrExp      time.Time
+	codeExp    time.Time
+	pairCancel context.CancelFunc
+	// The first reconnection is right away; reactivateWait is the wait before the next one.
+	reactivateBase, reactivateWait time.Duration
 }
 
 func Open(ctx context.Context, opt Options) (*Service, error) {
@@ -144,7 +145,7 @@ func Open(ctx context.Context, opt Options) (*Service, error) {
 	wastore.DeviceProps.RequireFullSync = proto.Bool(true)
 	wastore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 	wastore.DeviceProps.Os = proto.String("Linux")
-	s := &Service{opt: opt, root: ctx, tz: machineTZ()}
+	s := &Service{opt: opt, root: ctx, tz: machineTZ(), reactivateBase: time.Minute}
 	if err := s.start(); err != nil {
 		return nil, err
 	}
@@ -256,19 +257,28 @@ func (s *Service) newClientLocked(in *instance, device *wastore.Device) (Client,
 func (s *Service) reactivate(in *instance, g int, cli Client) {
 	// Under mu with the generation checked, so stop, which bumps it first, always waits for this.
 	s.update(g, func() {
-		if s.state != StateConnected {
+		if s.state == StateLoggedOut || s.state == StateOutdated {
+			s.opt.Log.Warn("o WhatsApp não pôs o aparelho no modo ativo, mas ele já saiu; sem reconectar", "estado", s.state)
 			return
 		}
-		now := s.now()
-		if now.Sub(s.reactivated) < reactivateEvery {
-			s.opt.Log.Error("o WhatsApp de novo não pôs o aparelho no modo ativo; sem reconectar outra vez antes de 1 min")
-			return
-		}
-		s.reactivated = now
-		s.opt.Log.Warn("o WhatsApp não pôs o aparelho no modo ativo, sem ele não chegam mensagens; reconectando")
+		wait := s.reactivateWait
+		s.reactivateWait = min(max(2*wait, s.reactivateBase), reactivateMaxWait)
+		s.opt.Log.Error("o WhatsApp não pôs o aparelho no modo ativo, sem ele não chegam mensagens; reconectando",
+			"em", wait.String())
 		in.wg.Go(func() {
+			select {
+			case <-in.ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			if !s.current(g) {
+				return
+			}
 			cli.Disconnect()
 			s.connect(in.ctx, g, cli)
+			if in.ctx.Err() == nil {
+				s.opt.Log.Info("reconectado ao WhatsApp; o whatsmeow repete o pedido de modo ativo")
+			}
 		})
 	})
 }

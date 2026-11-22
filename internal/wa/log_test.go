@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -90,6 +91,7 @@ func TestFailedActiveModeReconnects(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(svc.Close)
+	svc.reactivateBase = 200 * time.Millisecond
 	c := clients.Last()
 	watest.WaitFor(t, "the first connection", func() bool { return c.Connects() == 1 })
 	c.Log().Sub("Socket").Warnf("Failed to send post-connect passive IQ: %v", "timed out")
@@ -101,11 +103,16 @@ func TestFailedActiveModeReconnects(t *testing.T) {
 		t.Fatalf("reconnection not logged:\n%s", out.String())
 	}
 	c.Log().Warnf("Failed to get number of prekeys on server: %v", "x")
-	c.Log().Warnf("Failed to send post-connect passive IQ: %v", "timed out")
-	svc.Close()
 	if c.Connects() != 2 {
-		t.Fatalf("reconnected %d times; an unrelated warning or a second failure within a minute must not", c.Connects()-1)
+		t.Fatalf("an unrelated warning reconnected")
 	}
+	// A second failure waits before reconnecting, so a server that keeps refusing is not hammered.
+	c.Log().Warnf("Failed to send post-connect passive IQ: %v", "timed out")
+	if c.Connects() != 2 {
+		t.Fatalf("the second reconnection did not wait")
+	}
+	watest.WaitFor(t, "the delayed reconnection", func() bool { return c.Connects() == 3 })
+	watest.WaitFor(t, "the reconnection logged", func() bool { return strings.Contains(out.String(), "reconectado ao WhatsApp") })
 }
 
 func TestFailedActiveModeAfterLogoutDoesNotReconnect(t *testing.T) {

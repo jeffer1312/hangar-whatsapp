@@ -92,7 +92,8 @@ outros.
   ou `módulo=sessão`) e os eventos de conexão: conectado, queda, sessão aberta em outro cliente,
   suspensão, conexão recusada e mensagem não decifrada.
 - Depois do login, o whatsmeow avisa o servidor de que o aparelho está ativo; aparelho passivo não recebe
-  mensagens. Quando esse aviso falha, o serviço reconecta sozinho, e o novo login repete o aviso. A detecção
+  mensagens. Quando esse aviso falha, o serviço reconecta sozinho, e o novo login repete o aviso. Na
+  primeira falha reconecta na hora; nas seguintes espera 1 min, depois 2, 4..., até 30 min. A detecção
   depende do texto que o whatsmeow registra (`Failed to send post-connect passive IQ`). Se uma versão do
   whatsmeow mudar esse texto, a reconexão deixa de disparar, mas o aviso continua no log. O `state` segue
   `connected` nesse meio-tempo.
