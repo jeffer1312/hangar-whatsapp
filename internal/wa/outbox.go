@@ -87,9 +87,9 @@ func (s *Service) createDraft(ctx context.Context, in *instance, req DraftReques
 	default:
 		return store.Draft{}, false, ErrUnsupportedChat
 	}
-	cli := s.connectedClient()
-	if cli == nil {
-		return store.Draft{}, false, ErrNotPaired
+	cli, err := s.sendingClient()
+	if err != nil {
+		return store.Draft{}, false, err
 	}
 	if err := s.expire(ctx, in); err != nil {
 		return store.Draft{}, false, err
@@ -252,6 +252,18 @@ func (s *Service) Drafts(ctx context.Context, state string) ([]store.Draft, erro
 	})
 }
 
+// sendingClient is the connected client, or why there is none.
+func (s *Service) sendingClient() (Client, error) {
+	switch cli, _, state := s.snapshot(); {
+	case state == StateConnected && cli != nil:
+		return cli, nil
+	case state == StateOutdated:
+		return nil, ErrOutdated
+	default:
+		return nil, ErrNotPaired
+	}
+}
+
 func (s *Service) reachoutLocked(ctx context.Context, in *instance) (string, error) {
 	until, err := in.db.ReachoutLock(ctx)
 	if err != nil || until <= s.now().Format(store.TimeLayout) {
@@ -279,9 +291,9 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		} else if d.State != store.OutboxPending {
 			return store.Draft{}, store.ErrAnswered
 		}
-		cli := s.connectedClient()
-		if cli == nil {
-			return store.Draft{}, ErrNotPaired
+		cli, err := s.sendingClient()
+		if err != nil {
+			return store.Draft{}, err
 		}
 		if until, err := s.reachoutLocked(ctx, in); err != nil {
 			return store.Draft{}, err

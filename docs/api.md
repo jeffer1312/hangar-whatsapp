@@ -124,10 +124,10 @@ de erro das outras rotas. Horários em UTC, `2006-01-02T15:04:05Z`.
 
 | Rota | Sucesso | Erros próprios |
 |---|---|---|
-| `POST /v1/outbox` `{"chat","text","reply_to"?,"file"?,"origin","origin_cwd"?}` | 201 rascunho; 200 com o rascunho pendente igual, sem criar outro | 400 `bad_request`, `file_refused`; 409 `not_paired`, `unknown_chat`, `new_contact`, `unsupported_chat`; 413 `file_too_large`; 429 `too_many_drafts` |
+| `POST /v1/outbox` `{"chat","text","reply_to"?,"file"?,"origin","origin_cwd"?}` | 201 rascunho; 200 com o rascunho pendente igual, sem criar outro | 400 `bad_request`, `file_refused`; 409 `not_paired`, `outdated`, `unknown_chat`, `new_contact`, `unsupported_chat`; 413 `file_too_large`; 429 `too_many_drafts` |
 | `GET /v1/outbox?state=pending` | 200 `{"drafts":[…]}`, os 100 mais novos | 400 sem `state` válido |
 | `GET /v1/outbox/{id}` | 200 rascunho | 404 `not_found` |
-| `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `reachout_locked`; 429 `rate_limited` |
+| `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`, `reachout_locked`; 429 `rate_limited` |
 | `POST /v1/outbox/{id}/decline` | 200 rascunho em `declined` | 404 `not_found`; 409 `expired`, `answered` |
 
 Rascunho:
@@ -175,7 +175,8 @@ Anexo (`file`):
 - `source` é o caminho com as pastas resolvidas. `outside_cwd` é true quando o arquivo não está dentro de
   `origin_cwd` ou quando `origin_cwd` não veio.
 
-Envio (depois do 202, fora do pedido HTTP):
+Envio (depois do 202, fora do pedido HTTP; `sending` vira `sent` ou `failed` em no máximo 10 min depois da
+aprovação, o teto que cobre o upload de 100 MB):
 
 1. "digitando" na conversa, espera de `min(1 s + 50 ms por caractere, 6 s)`, "parou de digitar";
 2. upload do anexo, quando há;
@@ -199,4 +200,5 @@ ou 475 também trava por 24 h (ou até o fim já gravado, se for mais tarde): in
 trava é conferida de novo logo antes da mensagem sair.
 
 Na subida, todo `sending` vira `failed` com `error = "interrupted"` (sem reenvio) e as cópias sem rascunho
-pendente são apagadas. O `wipe` apaga também `outbox/`.
+pendente são apagadas. O `wipe` apaga a tabela `outbox` com o `messages.db`, e também `outbox/`: depois dele,
+`GET /v1/outbox/{id}` de um rascunho antigo responde 404 `not_found`.

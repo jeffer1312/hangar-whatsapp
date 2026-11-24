@@ -438,6 +438,20 @@ func TestDraftLifecycle(t *testing.T) {
 	}
 }
 
+func TestOutdatedClientSaysSo(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "oi"})
+	h.client().Emit(&events.ClientOutdated{})
+	watest.WaitFor(t, "outdated", func() bool { return h.status().State == "outdated" })
+	if _, _, err := h.draft(DraftRequest{Chat: chatA, Text: "outro"}); !errors.Is(err, ErrOutdated) {
+		t.Fatalf("draft while outdated = %v, want ErrOutdated", err)
+	}
+	if _, err := h.svc.ApproveDraft(context.Background(), d.ID, "desktop"); !errors.Is(err, ErrOutdated) {
+		t.Fatalf("send while outdated = %v, want ErrOutdated", err)
+	}
+}
+
 func TestSendNeedsAPairedDevice(t *testing.T) {
 	h := newOutboxHarness(t, true)
 	h.receive("M1", "olá")
