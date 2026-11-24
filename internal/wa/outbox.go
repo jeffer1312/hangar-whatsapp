@@ -50,6 +50,9 @@ func badDraft(msg string) error { return fmt.Errorf("%w: %s", ErrBadDraft, msg) 
 
 func outboxDir(dir string) string { return filepath.Join(dir, "outbox") }
 
+// copyDir holds the copy of a draft's attachment.
+func (s *Service) copyDir(id string) string { return filepath.Join(outboxDir(s.opt.Dir), id) }
+
 func newDraftID() string {
 	b := make([]byte, 8)
 	rand.Read(b)
@@ -87,7 +90,7 @@ func (s *Service) createDraft(ctx context.Context, in *instance, req DraftReques
 	default:
 		return store.Draft{}, false, ErrUnsupportedChat
 	}
-	cli, err := s.sendingClient()
+	cli, err := s.pairedClient()
 	if err != nil {
 		return store.Draft{}, false, err
 	}
@@ -120,7 +123,7 @@ func (s *Service) createDraft(ctx context.Context, in *instance, req DraftReques
 		}
 		d.ReplyTo, d.QuotedText, d.QuotedRaw = &req.ReplyTo, &text, raw
 	}
-	copyDir := filepath.Join(outboxDir(s.opt.Dir), d.ID)
+	copyDir := s.copyDir(d.ID)
 	if req.File != "" {
 		if d.File, err = attach(req.File, req.OriginCwd, s.opt.Dir, copyDir); err != nil {
 			return store.Draft{}, false, err
@@ -189,7 +192,7 @@ func (s *Service) sweep(ctx context.Context, in *instance, startup bool) {
 		d, err := in.db.Draft(ctx, e.Name())
 		final := err == nil && d.State != store.OutboxPending && d.State != store.OutboxSending
 		if final || (startup && errors.Is(err, store.ErrDraftNotFound)) {
-			if err := os.RemoveAll(filepath.Join(outboxDir(s.opt.Dir), e.Name())); err != nil {
+			if err := os.RemoveAll(s.copyDir(e.Name())); err != nil {
 				s.opt.Log.Error("apagar cópia do anexo", "rascunho", e.Name(), "erro", err)
 			}
 		}
@@ -206,7 +209,7 @@ func (s *Service) recoverOutbox(in *instance) error {
 	if n > 0 {
 		s.opt.Log.Warn("envios interrompidos pela parada anterior marcados como falha, sem reenvio", "rascunhos", n)
 	}
-	if err := s.expire(in.ctx, in); err != nil {
+	if _, err := in.db.ExpireDrafts(in.ctx, s.now()); err != nil {
 		return err
 	}
 	s.sweep(in.ctx, in, true)
@@ -252,24 +255,20 @@ func (s *Service) Drafts(ctx context.Context, state string) ([]store.Draft, erro
 	})
 }
 
-// sendingClient is the connected client, or why there is none.
-func (s *Service) sendingClient() (Client, error) {
-	switch cli, _, state := s.snapshot(); {
-	case state == StateConnected && cli != nil:
-		return cli, nil
-	case state == StateOutdated:
-		return nil, ErrOutdated
-	default:
-		return nil, ErrNotPaired
-	}
-}
-
 func (s *Service) reachoutLocked(ctx context.Context, in *instance) (string, error) {
 	until, err := in.db.ReachoutLock(ctx)
 	if err != nil || until <= s.now().Format(store.TimeLayout) {
 		return "", err
 	}
 	return until, nil
+}
+
+func (s *Service) checkReachout(ctx context.Context, in *instance) error {
+	until, err := s.reachoutLocked(ctx, in)
+	if err == nil && until != "" {
+		err = fmt.Errorf("%w até %s", ErrReachoutLocked, until)
+	}
+	return err
 }
 
 // ApproveDraft approves a pending draft. The send runs after the answer, on the service's context, so
@@ -282,23 +281,20 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		if err := s.expire(ctx, in); err != nil {
 			return store.Draft{}, err
 		}
+		// The draft's own state answers first: an expired draft says expired even while unpaired.
 		d, err := in.db.Draft(ctx, id)
-		if err != nil {
-			return d, err
+		if err == nil {
+			err = store.StateErr(d.State)
 		}
-		if d.State == store.OutboxExpired {
-			return store.Draft{}, store.ErrExpired
-		} else if d.State != store.OutboxPending {
-			return store.Draft{}, store.ErrAnswered
-		}
-		cli, err := s.sendingClient()
 		if err != nil {
 			return store.Draft{}, err
 		}
-		if until, err := s.reachoutLocked(ctx, in); err != nil {
+		cli, err := s.pairedClient()
+		if err != nil {
 			return store.Draft{}, err
-		} else if until != "" {
-			return store.Draft{}, fmt.Errorf("%w até %s", ErrReachoutLocked, until)
+		}
+		if err := s.checkReachout(ctx, in); err != nil {
+			return store.Draft{}, err
 		}
 		d, err = in.db.ClaimSend(ctx, id, via, s.now())
 		if errors.Is(err, store.ErrExpired) {
@@ -369,15 +365,22 @@ func failure(err error) (string, int) {
 func (s *Service) deliver(in *instance, cli Client, d store.Draft) {
 	ctx, cancel := context.WithTimeout(in.ctx, sendTimeout)
 	defer cancel()
-	copyDir := filepath.Join(outboxDir(s.opt.Dir), d.ID)
+	copyDir := s.copyDir(d.ID)
 	defer os.RemoveAll(copyDir)
-	to, msg, resp, err := s.transmit(ctx, in, cli, d, copyDir)
+	to, err := types.ParseJID(d.Address)
+	var msg *waE2E.Message
+	var resp whatsmeow.SendResponse
+	if err != nil {
+		err = fmt.Errorf("endereço da conversa ilegível: %w", err)
+	} else {
+		msg, resp, err = s.transmit(ctx, in, cli, d, to, copyDir)
+	}
 	// The draft's final state is written even when the service is stopping.
 	done := context.WithoutCancel(ctx)
 	if err != nil {
 		reason, code := failure(err)
 		s.opt.Log.Error("envio não saiu; sem reenvio", "rascunho", d.ID, "erro", err)
-		if code == 463 || code == 475 {
+		if reason == "reachout_locked" && code != 0 {
 			s.holdReachout(done, in, s.now().Add(24*time.Hour))
 		}
 		if err := in.db.FinishFailed(done, d.ID, reason, code); err != nil {
@@ -392,28 +395,24 @@ func (s *Service) deliver(in *instance, cli Client, d store.Draft) {
 	}
 }
 
-func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d store.Draft, copyDir string) (types.JID, *waE2E.Message, whatsmeow.SendResponse, error) {
+func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d store.Draft, to types.JID, copyDir string) (*waE2E.Message, whatsmeow.SendResponse, error) {
 	var resp whatsmeow.SendResponse
-	to, err := types.ParseJID(d.Address)
-	if err != nil {
-		return to, nil, resp, fmt.Errorf("endereço da conversa ilegível: %w", err)
-	}
 	if err := cli.SendChatPresence(ctx, to, types.ChatPresenceComposing, types.ChatPresenceMediaText); err != nil {
-		return to, nil, resp, fmt.Errorf("mostrar digitando: %w", err)
+		return nil, resp, fmt.Errorf("mostrar digitando: %w", err)
 	}
 	if err := s.opt.Wait(ctx, typingFor(d.Text)); err != nil {
-		return to, nil, resp, err
+		return nil, resp, err
 	}
 	if err := cli.SendChatPresence(ctx, to, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
-		return to, nil, resp, fmt.Errorf("parar de mostrar digitando: %w", err)
+		return nil, resp, fmt.Errorf("parar de mostrar digitando: %w", err)
 	}
 	quote := quoteContext(cli, d)
 	var msg *waE2E.Message
 	switch {
 	case d.File != nil:
-		doc, err := upload(ctx, cli, filepath.Join(copyDir, d.File.Name), d.File.Name)
+		doc, err := upload(ctx, cli, copyDir, d.File.Name)
 		if err != nil {
-			return to, nil, resp, err
+			return nil, resp, err
 		}
 		if d.Text != "" {
 			doc.Caption = proto.String(d.Text)
@@ -426,16 +425,14 @@ func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d stor
 		msg = &waE2E.Message{Conversation: proto.String(d.Text)}
 	}
 	// A lock may have arrived during the typing wait or the upload.
-	if until, err := s.reachoutLocked(ctx, in); err != nil {
-		return to, nil, resp, err
-	} else if until != "" {
-		return to, nil, resp, fmt.Errorf("%w até %s", ErrReachoutLocked, until)
+	if err := s.checkReachout(ctx, in); err != nil {
+		return nil, resp, err
 	}
-	resp, err = cli.SendMessage(ctx, to, msg)
+	resp, err := cli.SendMessage(ctx, to, msg)
 	if err != nil && !errors.Is(err, whatsmeow.ErrServerReturnedError) && (errors.Is(err, whatsmeow.ErrMessageTimedOut) || ctx.Err() != nil) {
 		err = fmt.Errorf("%w: %w", errUnconfirmed, err)
 	}
-	return to, msg, resp, err
+	return msg, resp, err
 }
 
 // holdReachout locks sends until the given time unless a later lock is already recorded: a 463 or 475
@@ -451,13 +448,21 @@ func (s *Service) holdReachout(ctx context.Context, in *instance, until time.Tim
 	}
 }
 
-func upload(ctx context.Context, cli Client, path, name string) (*waE2E.DocumentMessage, error) {
-	f, err := os.Open(path)
+func upload(ctx context.Context, cli Client, dir, name string) (*waE2E.DocumentMessage, error) {
+	f, err := os.Open(filepath.Join(dir, name))
 	if err != nil {
 		return nil, fmt.Errorf("abrir a cópia do anexo: %w", err)
 	}
 	defer f.Close()
-	up, err := cli.UploadReader(ctx, f, nil, whatsmeow.MediaDocument)
+	// The encrypted copy goes next to the plain one: with no file whatsmeow uses the system temp
+	// folder, often tmpfs, where 100 MB is memory.
+	enc, err := os.CreateTemp(dir, ".upload-*")
+	if err != nil {
+		return nil, err
+	}
+	defer os.Remove(enc.Name())
+	defer enc.Close()
+	up, err := cli.UploadReader(ctx, f, enc, whatsmeow.MediaDocument)
 	if err != nil {
 		return nil, fmt.Errorf("subir o anexo: %w", err)
 	}
@@ -501,22 +506,21 @@ func quoteContext(cli Client, d store.Draft) *waE2E.ContextInfo {
 // archived is the sent message as the archive keeps it; the attachment's copy moves into media/
 // instead of being downloaded back.
 func (s *Service) archived(cli Client, d store.Draft, to types.JID, msg *waE2E.Message, resp whatsmeow.SendResponse, copyDir string) (store.Record, string) {
+	info := types.MessageInfo{MessageSource: types.MessageSource{Chat: to, IsFromMe: true, IsGroup: to.Server == types.GroupServer}}
+	if own := cli.Device().ID; own != nil {
+		info.Sender = *own
+	}
+	raw, err := rawOf(info, msg)
+	if err != nil {
+		s.opt.Log.Error("serializar mensagem enviada", "erro", err)
+	}
 	c := contentOf(msg)
 	at := resp.Timestamp
 	if at.IsZero() {
 		at = s.now()
 	}
-	sender := ""
-	if own := cli.Device().ID; own != nil {
-		sender = own.String()
-	}
-	body, err := protojson.Marshal(msg)
-	if err != nil {
-		s.opt.Log.Error("serializar mensagem enviada", "erro", err)
-	}
-	raw, _ := json.Marshal(original{Chat: to.String(), Sender: sender, FromMe: true, Group: to.Server == types.GroupServer, Message: body})
 	rec := store.Record{Chat: d.Chat, ID: resp.ID, FromMe: true, At: at, Kind: c.kind, Text: c.text, Mime: c.mime,
-		ReplyTo: c.replyTo, Raw: string(raw)}
+		ReplyTo: c.replyTo, Raw: raw}
 	if d.File == nil {
 		return rec, ""
 	}
@@ -525,11 +529,11 @@ func (s *Service) archived(cli Client, d store.Draft, to types.JID, msg *waE2E.M
 	if !ok {
 		return rec, ""
 	}
-	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
-		s.opt.Log.Warn("guardar anexo enviado; ele será baixado de volta", "erro", err)
-		return rec, ""
+	err = os.MkdirAll(filepath.Dir(dest), 0o700)
+	if err == nil {
+		err = os.Rename(filepath.Join(copyDir, d.File.Name), dest)
 	}
-	if err := os.Rename(filepath.Join(copyDir, d.File.Name), dest); err != nil {
+	if err != nil {
 		s.opt.Log.Warn("guardar anexo enviado; ele será baixado de volta", "erro", err)
 		return rec, ""
 	}

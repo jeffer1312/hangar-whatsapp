@@ -189,20 +189,17 @@ func (d *DB) CreateDraft(ctx context.Context, dr Draft, now time.Time) (Draft, b
 	if err != nil {
 		return Draft{}, false, err
 	}
-	var file DraftFile
-	var hasFile any
-	if dr.File != nil {
-		file, hasFile = *dr.File, 1
+	// Without a file the five columns bind nil, which is NULL.
+	var name, size, sha, source, outside any
+	if f := dr.File; f != nil {
+		name, size, sha, source, outside = f.Name, f.Size, f.SHA256, f.Source, f.OutsideCwd
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO outbox (id, dedup, origin, chat, address, chat_kind, chat_number, chat_name,
 			chat_name_source, recent, text, reply_to, quoted_text, quoted_raw, file_name, file_size, file_sha256, file_source,
 			file_outside_cwd, created_at, expires_at, state)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, nullif(?, ''),
-			iif(? IS NULL, NULL, ?), iif(? IS NULL, NULL, ?), iif(? IS NULL, NULL, ?), iif(? IS NULL, NULL, ?), iif(? IS NULL, NULL, ?),
-			?, ?, 'pending')`,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, nullif(?, ''), ?, ?, ?, ?, ?, ?, ?, 'pending')`,
 		dr.ID, key, dr.Origin, dr.Chat, dr.Address, dr.ChatKind, dr.ChatNumber, dr.ChatName, dr.ChatNameSource, string(recent),
-		dr.Text, dr.ReplyTo, dr.QuotedText, dr.QuotedRaw,
-		hasFile, file.Name, hasFile, file.Size, hasFile, file.SHA256, hasFile, file.Source, hasFile, file.OutsideCwd,
+		dr.Text, dr.ReplyTo, dr.QuotedText, dr.QuotedRaw, name, size, sha, source, outside,
 		now.UTC().Format(TimeLayout), now.Add(DraftTTL).UTC().Format(TimeLayout)); err != nil {
 		return Draft{}, false, err
 	}
@@ -215,29 +212,41 @@ func (d *DB) CreateDraft(ctx context.Context, dr Draft, now time.Time) (Draft, b
 
 // Draft and Drafts only read: callers run ExpireDrafts first with their clock.
 func (d *DB) Draft(ctx context.Context, id string) (Draft, error) {
-	return getDraft(ctx, d.w, id)
+	var dr Draft
+	err := d.read(ctx, func(ctx context.Context) (err error) {
+		dr, err = getDraft(ctx, d.r, id)
+		return err
+	})
+	return dr, err
 }
 
 // Drafts lists the newest 100 drafts in a state.
 func (d *DB) Drafts(ctx context.Context, state string) ([]Draft, error) {
-	rows, err := d.w.QueryContext(ctx, `SELECT `+draftColumns+` FROM outbox WHERE state = ? ORDER BY created_at DESC, id DESC LIMIT 100`, state)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	list := []Draft{}
-	for rows.Next() {
-		dr, err := scanDraft(rows)
+	err := d.read(ctx, func(ctx context.Context) error {
+		rows, err := d.r.QueryContext(ctx, `SELECT `+draftColumns+` FROM outbox WHERE state = ? ORDER BY created_at DESC, id DESC LIMIT 100`, state)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		list = append(list, dr)
-	}
-	return list, rows.Err()
+		defer rows.Close()
+		for rows.Next() {
+			dr, err := scanDraft(rows)
+			if err != nil {
+				return err
+			}
+			list = append(list, dr)
+		}
+		return rows.Err()
+	})
+	return list, err
 }
 
-func answeredErr(state string) error {
-	if state == OutboxExpired {
+// StateErr is why a draft in this state cannot be answered, nil while it is pending.
+func StateErr(state string) error {
+	switch state {
+	case OutboxPending:
+		return nil
+	case OutboxExpired:
 		return ErrExpired
 	}
 	return ErrAnswered
@@ -252,10 +261,7 @@ func pendingInTx(ctx context.Context, tx *sql.Tx, id string, now time.Time) (Dra
 	if err != nil {
 		return dr, err
 	}
-	if dr.State != OutboxPending {
-		return dr, answeredErr(dr.State)
-	}
-	return dr, nil
+	return dr, StateErr(dr.State)
 }
 
 const sendWindow = `SELECT count(CASE WHEN answered_at > ? THEN 1 END), count(*) FROM outbox
@@ -268,13 +274,17 @@ func sendCounts(ctx context.Context, q querier, now time.Time) (minute, day int,
 }
 
 // CountSends is how many drafts were approved for sending in the last minute and the last 24 h.
-func (d *DB) CountSends(ctx context.Context, now time.Time) (int, int, error) {
-	return sendCounts(ctx, d.w, now)
+func (d *DB) CountSends(ctx context.Context, now time.Time) (minute, day int, err error) {
+	err = d.read(ctx, func(ctx context.Context) (err error) {
+		minute, day, err = sendCounts(ctx, d.r, now)
+		return err
+	})
+	return minute, day, err
 }
 
-// ClaimSend moves a pending draft to sending. The caps and the change share one IMMEDIATE transaction,
-// so two approvals at once cannot both pass the count or both win the same draft.
-func (d *DB) ClaimSend(ctx context.Context, id, via string, now time.Time) (Draft, error) {
+// answer runs change on a draft that is still pending, in one IMMEDIATE transaction with the check.
+// An expiry found on the way is kept even though the answer is refused.
+func (d *DB) answer(ctx context.Context, id string, now time.Time, change func(tx *sql.Tx) error) (Draft, error) {
 	tx, err := d.w.BeginTx(ctx, nil)
 	if err != nil {
 		return Draft{}, err
@@ -282,20 +292,11 @@ func (d *DB) ClaimSend(ctx context.Context, id, via string, now time.Time) (Draf
 	defer tx.Rollback()
 	if _, err := pendingInTx(ctx, tx, id, now); err != nil {
 		if errors.Is(err, ErrExpired) {
-			// The expiry above is kept even though the send is refused.
 			return Draft{}, errors.Join(err, tx.Commit())
 		}
 		return Draft{}, err
 	}
-	minute, day, err := sendCounts(ctx, tx, now)
-	if err != nil {
-		return Draft{}, err
-	}
-	if minute >= SendsPerMinute || day >= SendsPerDay {
-		return Draft{}, ErrSendLimit
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state = 'sending', via = ?, answered_at = ? WHERE id = ?`,
-		via, now.UTC().Format(TimeLayout), id); err != nil {
+	if err := change(tx); err != nil {
 		return Draft{}, err
 	}
 	dr, err := getDraft(ctx, tx, id)
@@ -303,29 +304,31 @@ func (d *DB) ClaimSend(ctx context.Context, id, via string, now time.Time) (Draf
 		return Draft{}, err
 	}
 	return dr, tx.Commit()
+}
+
+// ClaimSend moves a pending draft to sending. The caps and the change share the transaction, so two
+// approvals at once cannot both pass the count or both win the same draft.
+func (d *DB) ClaimSend(ctx context.Context, id, via string, now time.Time) (Draft, error) {
+	return d.answer(ctx, id, now, func(tx *sql.Tx) error {
+		minute, day, err := sendCounts(ctx, tx, now)
+		if err != nil {
+			return err
+		}
+		if minute >= SendsPerMinute || day >= SendsPerDay {
+			return ErrSendLimit
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE outbox SET state = 'sending', via = ?, answered_at = ? WHERE id = ?`,
+			via, now.UTC().Format(TimeLayout), id)
+		return err
+	})
 }
 
 func (d *DB) Decline(ctx context.Context, id string, now time.Time) (Draft, error) {
-	tx, err := d.w.BeginTx(ctx, nil)
-	if err != nil {
-		return Draft{}, err
-	}
-	defer tx.Rollback()
-	if _, err := pendingInTx(ctx, tx, id, now); err != nil {
-		if errors.Is(err, ErrExpired) {
-			return Draft{}, errors.Join(err, tx.Commit())
-		}
-		return Draft{}, err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE outbox SET state = 'declined', answered_at = ? WHERE id = ?`,
-		now.UTC().Format(TimeLayout), id); err != nil {
-		return Draft{}, err
-	}
-	dr, err := getDraft(ctx, tx, id)
-	if err != nil {
-		return Draft{}, err
-	}
-	return dr, tx.Commit()
+	return d.answer(ctx, id, now, func(tx *sql.Tx) error {
+		_, err := tx.ExecContext(ctx, `UPDATE outbox SET state = 'declined', answered_at = ? WHERE id = ?`,
+			now.UTC().Format(TimeLayout), id)
+		return err
+	})
 }
 
 // FinishSent records the message id and puts the sent message in the archive, with media as the
@@ -432,10 +435,13 @@ const reachoutKey = "reachout_locked_until"
 // ReachoutLock is until when WhatsApp forbids messages to new contacts, empty without a lock.
 func (d *DB) ReachoutLock(ctx context.Context) (string, error) {
 	var until string
-	err := d.w.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, reachoutKey).Scan(&until)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
+	err := d.read(ctx, func(ctx context.Context) error {
+		err := d.r.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, reachoutKey).Scan(&until)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	})
 	return until, err
 }
 

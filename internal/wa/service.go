@@ -338,6 +338,18 @@ func (s *Service) connectedClient() Client {
 	return s.cli
 }
 
+// pairedClient is the connected client, or why there is none.
+func (s *Service) pairedClient() (Client, error) {
+	switch cli, _, state := s.snapshot(); {
+	case state == StateConnected && cli != nil:
+		return cli, nil
+	case state == StateOutdated:
+		return nil, ErrOutdated
+	default:
+		return nil, ErrNotPaired
+	}
+}
+
 // snapshot is the current client, its generation and state, read together.
 func (s *Service) snapshot() (Client, int, string) {
 	s.mu.Lock()
@@ -614,12 +626,8 @@ func (s *Service) Search(ctx context.Context, q, chat string, limit int) ([]stor
 // RequestMedia marks old media for the phone to send; each one is a notification on the phone.
 func (s *Service) RequestMedia(ctx context.Context, chat, id, since string) (store.MediaRequest, error) {
 	return with(s, func(in *instance) (store.MediaRequest, error) {
-		switch _, _, state := s.snapshot(); state {
-		case StateConnected:
-		case StateOutdated:
-			return store.MediaRequest{}, ErrOutdated
-		default:
-			return store.MediaRequest{}, ErrNotPaired
+		if _, err := s.pairedClient(); err != nil {
+			return store.MediaRequest{}, err
 		}
 		r, err := in.db.RequestMedia(ctx, chat, id, since, s.now())
 		if err == nil && r.Requested > 0 {

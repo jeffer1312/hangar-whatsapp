@@ -24,6 +24,17 @@ type original struct {
 	Message json.RawMessage `json:"message"`
 }
 
+// rawOf is the raw column of a message: what WhatsApp sent, with its original address.
+func rawOf(info types.MessageInfo, msg *waE2E.Message) (string, error) {
+	body, err := protojson.Marshal(msg)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.Marshal(original{Chat: info.Chat.String(), Sender: info.Sender.String(), FromMe: info.IsFromMe,
+		Group: info.IsGroup, Message: body})
+	return string(raw), err
+}
+
 type archiver struct {
 	ctx context.Context
 	db  *store.DB
@@ -68,16 +79,13 @@ func (a *archiver) message(cli Client, e *events.Message, chat types.JID) (media
 	if c.kind == "" {
 		return false, false
 	}
-	msg, err := protojson.Marshal(e.Message)
+	raw, err := rawOf(info, e.Message)
 	if err != nil {
 		a.log.Error("serializar mensagem", "erro", err)
 		return false, true
 	}
-	raw, _ := json.Marshal(original{
-		Chat: info.Chat.String(), Sender: info.Sender.String(), FromMe: info.IsFromMe, Group: info.IsGroup, Message: msg,
-	})
 	r := store.Record{Chat: chat.String(), ID: info.ID, FromMe: info.IsFromMe, At: info.Timestamp,
-		Kind: c.kind, Text: c.text, Mime: c.mime, ReplyTo: c.replyTo, Raw: string(raw)}
+		Kind: c.kind, Text: c.text, Mime: c.mime, ReplyTo: c.replyTo, Raw: raw}
 	if !info.IsFromMe {
 		r.Sender = a.normalize(cli, info.Sender).String()
 	}
