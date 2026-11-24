@@ -39,6 +39,9 @@ func refusal(path, dataDir string) string {
 	if within(path, dataDir) || within(path, resolved(dataDir)) {
 		return "fica na pasta de dados do hangar-whatsapp"
 	}
+	if systemPath(path) {
+		return "é arquivo do sistema, não de usuário"
+	}
 	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
 		if strings.HasPrefix(part, ".") {
 			return "fica em pasta ou arquivo oculto (" + part + ")"

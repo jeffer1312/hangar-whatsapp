@@ -2,8 +2,10 @@ package wa
 
 import (
 	"context"
+	"io"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/proto/waWeb"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
@@ -11,8 +13,9 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
-// Client is the part of *whatsmeow.Client the service uses. Nothing here sends a message: the
-// only outgoing call is SendMediaRetryReceipt, which asks the phone to upload old media again.
+// Client is the part of *whatsmeow.Client the service uses. SendMediaRetryReceipt asks the phone to
+// upload old media again; SendChatPresence, UploadReader and SendMessage send a draft the owner
+// approved, and only outbox.go may call them (sendlist_test.go).
 type Client interface {
 	Device() *wastore.Device
 	AddEventHandler(handler whatsmeow.EventHandler) uint32
@@ -24,6 +27,9 @@ type Client interface {
 	ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error)
 	DownloadToFile(ctx context.Context, msg whatsmeow.DownloadableMessage, file whatsmeow.File) error
 	SendMediaRetryReceipt(ctx context.Context, info *types.MessageInfo, mediaKey []byte) error
+	SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error
+	UploadReader(ctx context.Context, plaintext io.Reader, tempFile io.ReadWriteSeeker, appInfo whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+	SendMessage(ctx context.Context, to types.JID, message *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)
 }
 
 type realClient struct{ *whatsmeow.Client }

@@ -4,6 +4,8 @@ package wa
 
 import "os"
 
+func systemPath(string) bool { return false }
+
 // Windows has no O_NOFOLLOW: the link check comes right before the open.
 func openNoFollow(path string) (*os.File, error) {
 	st, err := os.Lstat(path)

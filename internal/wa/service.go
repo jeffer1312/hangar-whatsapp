@@ -23,7 +23,8 @@ import (
 	"github.com/jeffer1312/hangar-whatsapp/internal/store"
 )
 
-const API = 1
+// API 2 adds the outbox (C5).
+const API = 2
 
 // Pairing codes have no published expiry; the login socket closes when the QR codes run out
 // (60 s plus five of 20 s).
@@ -149,6 +150,9 @@ func Open(ctx context.Context, opt Options) (*Service, error) {
 	}
 	if opt.NewClient == nil {
 		opt.NewClient = NewRealClient
+	}
+	if opt.Wait == nil {
+		opt.Wait = wait
 	}
 	dir, err := filepath.Abs(opt.Dir)
 	if err != nil {
@@ -391,6 +395,8 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 		s.update(g, func() { s.resetLocked(StateOutdated, "") })
 	case *events.MediaRetry:
 		in.media.reply(e)
+	case *events.NotifyAccountReachoutTimelock:
+		s.lockReachout(in, e)
 	case *events.Message:
 		if media, _ := in.archive.message(cli, e, types.EmptyJID); media {
 			in.media.wake()

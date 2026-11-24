@@ -1,30 +1,37 @@
 package wa
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode"
 )
 
-// The archiver never writes to WhatsApp. The only outgoing call it may name is the media retry
-// receipt; the delivery and read receipts whatsmeow sends by itself do not go through our code.
-var allowedOutgoing = map[string]bool{"SendMediaRetryReceipt": true}
+// The service writes to WhatsApp in two ways only: the media retry receipt, and a draft the owner
+// approved (typing indicator, upload, message), sent only from outbox.go. The delivery receipts
+// whatsmeow sends by itself do not go through our code.
+var allowedEverywhere = map[string]bool{"SendMediaRetryReceipt": true}
 
-// Calls that would show the user as active or tell the sender the message was read.
-var forbidden = map[string]bool{"MarkRead": true, "SubscribePresence": true, "SetStatusMessage": true}
+var draftNames = map[string]bool{"SendMessage": true, "SendChatPresence": true, "UploadReader": true,
+	"SendResponse": true, "SendRequestExtra": true}
 
-func TestOnlyTheMediaRetryReceiptIsSent(t *testing.T) {
-	root, err := filepath.Abs(filepath.Join("..", ".."))
-	if err != nil {
-		t.Fatal(err)
-	}
+// The sender, the interface and the stand-in.
+var draftFiles = map[string]bool{"internal/wa/outbox.go": true, "internal/wa/client.go": true, "internal/wa/watest/fake.go": true}
+
+var uploads = map[string]bool{"Upload": true, "UploadReader": true, "UploadNewsletter": true, "UploadNewsletterReader": true}
+
+// Calls that would show the user as active or tell the sender the message was read, in any file.
+var forbidden = map[string]bool{"MarkRead": true, "SendPresence": true, "SubscribePresence": true, "SetStatusMessage": true}
+
+func outgoing(root string) (map[string][]string, error) {
 	found := map[string][]string{}
-	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -38,24 +45,64 @@ func TestOnlyTheMediaRetryReceiptIsSent(t *testing.T) {
 		if err != nil {
 			return err
 		}
+		rel, _ := filepath.Rel(root, path)
+		rel = filepath.ToSlash(rel)
 		ast.Inspect(file, func(n ast.Node) bool {
-			if id, ok := n.(*ast.Ident); ok {
-				name := id.Name
-				// Send, SendMessage, SendPresence…, but not Sender.
-				send := strings.HasPrefix(name, "Send") && (len(name) == 4 || unicode.IsUpper(rune(name[4])))
-				if (send && !allowedOutgoing[name]) || forbidden[name] {
-					rel, _ := filepath.Rel(root, path)
-					found[name] = append(found[name], rel)
-				}
+			id, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			name := id.Name
+			// Send, SendMessage, SendPresence…, but not Sender.
+			send := strings.HasPrefix(name, "Send") && (len(name) == 4 || unicode.IsUpper(rune(name[4])))
+			allowed := allowedEverywhere[name] || (draftNames[name] && draftFiles[rel])
+			if forbidden[name] || ((send || uploads[name]) && !allowed) {
+				found[name] = append(found[name], rel)
 			}
 			return true
 		})
 		return nil
 	})
+	return found, err
+}
+
+func TestOutgoingCallsStayInTheClosedList(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, err := outgoing(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(found) > 0 {
 		t.Fatalf("outgoing WhatsApp calls outside the closed list: %v", found)
+	}
+}
+
+func TestClosedListCatchesStrayCalls(t *testing.T) {
+	root := t.TempDir()
+	put := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("package x\n\nfunc f() {\n"+body+"\n}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("internal/wa/outbox.go", "c.SendMessage(); c.UploadReader(); c.MarkRead(); c.SendPresence()")
+	put("internal/wa/media.go", "c.SendMediaRetryReceipt(); c.SendMessage()")
+	put("internal/api/api.go", "c.Upload(); c.SubscribePresence(); c.SendChatPresence()")
+	found, err := outgoing(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string][]string{"MarkRead": {"internal/wa/outbox.go"}, "SendPresence": {"internal/wa/outbox.go"},
+		"SendMessage": {"internal/wa/media.go"}, "Upload": {"internal/api/api.go"}, "SubscribePresence": {"internal/api/api.go"},
+		"SendChatPresence": {"internal/api/api.go"}}
+	if fmt.Sprint(found) != fmt.Sprint(want) {
+		t.Fatalf("found = %v\nwant  %v", found, want)
 	}
 }

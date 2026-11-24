@@ -1,12 +1,17 @@
 # hangar-whatsapp
 
-Arquivador **só de leitura** do seu WhatsApp para o [Hangar](https://hangar.dev.br). Ele entra como aparelho
-conectado (igual ao WhatsApp Web), guarda mensagens, histórico e mídia numa pasta local e deixa as sessões do
-Hangar lerem e buscarem esse arquivo. Não envia mensagem, não marca como lida, não mostra "online". Só manda,
-pelo whatsmeow, os recibos de entrega automáticos, os mesmos que o celular já manda, e nunca recibo de leitura.
+Arquivador do seu WhatsApp para o [Hangar](https://hangar.dev.br): **lê tudo e envia só rascunho aprovado**. Ele
+entra como aparelho conectado (igual ao WhatsApp Web), guarda mensagens, histórico e mídia numa pasta local e
+deixa as sessões do Hangar lerem e buscarem esse arquivo. Uma sessão pode criar um rascunho (texto e, se quiser,
+um arquivo); a mensagem só sai quando você toca em "Enviar" no cartão do Hangar. Não marca como lida, não mostra
+"online". Pelo whatsmeow só saem, além do que você aprovou, os recibos de entrega automáticos, os mesmos que o
+celular já manda, e nunca recibo de leitura.
 
 > **Risco.** É um cliente não oficial ([whatsmeow](https://github.com/tulir/whatsmeow)). O WhatsApp pode
-> banir o número que usar cliente não oficial. Só ler é o uso de menor risco, mas não é risco zero.
+> banir o número que usar cliente não oficial. Ler é o uso de menor risco, mas não é risco zero; enviar aumenta
+> o risco, e o maior é escrever para quem nunca falou com a conta. Por isso o envio é manual e tem freio:
+> 3 por minuto e 20 em 24 h, rascunho que expira em 10 min, nada para contato novo, e nenhum reenvio depois de
+> falha ou de trava do WhatsApp.
 > Os dados ficam só na sua máquina, em `--data`. O `session.db` dá acesso à conta: não compartilhe.
 
 O Hangar instala, atualiza e supervisiona este binário pela página Configurações > WhatsApp. Rodar à mão só
@@ -35,9 +40,10 @@ reconecta sozinho; essa detecção depende do texto do aviso do whatsmeow (ver [
 
 | Arquivo | O que é |
 |---|---|
-| `messages.db` | SQLite: `messages`, `contacts`, `media_requests` e a visão `chats` |
+| `messages.db` | SQLite: `messages`, `contacts`, `media_requests`, `outbox` (rascunhos e o que saiu), `settings` e a visão `chats` |
 | `session.db` | chaves do aparelho (whatsmeow); fica travado enquanto o serviço roda |
 | `media/` | arquivos de mídia, `media/<número>/<id>.<ext>` |
+| `outbox/` | cópia do anexo de cada rascunho aberto, `outbox/<id>/<nome>` |
 | `control.json`, `control.key` | porta, pid e chave da API (ver [docs/api.md](docs/api.md)) |
 
 Mídia antiga que o servidor do WhatsApp já apagou só o celular tem. Ela é pedida sob demanda

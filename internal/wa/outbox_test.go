@@ -5,13 +5,17 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"go.mau.fi/util/jsontime"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waAdv"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	wastore "go.mau.fi/whatsmeow/store"
@@ -25,8 +29,22 @@ import (
 )
 
 type clock struct {
-	mu  sync.Mutex
-	now time.Time
+	mu    sync.Mutex
+	now   time.Time
+	waits []time.Duration
+}
+
+func (c *clock) wait(ctx context.Context, d time.Duration) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.waits = append(c.waits, d)
+	return nil
+}
+
+func (c *clock) Waits() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration(nil), c.waits...)
 }
 
 func (c *clock) Now() time.Time {
@@ -50,7 +68,7 @@ func openOutbox(t *testing.T, dir string, clk *clock, clients *watest.Factory) *
 	t.Helper()
 	svc, err := Open(context.Background(), Options{Dir: dir, Version: "0.2.0", Now: clk.Now,
 		NewClient: func(d *wastore.Device, l waLog.Logger) Client { return clients.New(d, l) },
-		Wait:      func(context.Context, time.Duration) error { return nil }})
+		Wait:      clk.wait})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,8 +308,38 @@ func TestDraftAttachmentRefusals(t *testing.T) {
 			t.Errorf("%s: CreateDraft = %v, want %v", c.name, err, c.want)
 		}
 	}
+	if runtime.GOOS != "windows" {
+		for _, p := range []string{"/proc/self/environ", "/sys/kernel/mm/transparent_hugepage/enabled"} {
+			if _, err := os.Stat(p); err != nil {
+				continue
+			}
+			if _, _, err := h.draft(DraftRequest{Chat: chatA, Text: p, File: p}); !errors.Is(err, ErrFileRefused) {
+				t.Errorf("%s: CreateDraft = %v, want ErrFileRefused", p, err)
+			}
+		}
+	}
 	if entries, _ := os.ReadDir(filepath.Join(h.dir, "outbox")); len(entries) != 0 {
 		t.Fatalf("refused attachments left copies: %v", entries)
+	}
+}
+
+func TestCopyOfADraftExpiredByAnotherAnswerIsDeleted(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	zip := writeFile(t, filepath.Join(t.TempDir(), "a.zip"), "PK")
+	a := h.mustDraft(DraftRequest{Origin: "n::a", Chat: chatA, Text: "a", File: zip})
+	h.clock.Add(9 * time.Minute)
+	b := h.mustDraft(DraftRequest{Origin: "n::b", Chat: chatA, Text: "b"})
+	h.clock.Add(2 * time.Minute)
+	// The decline's own transaction expires a; nothing else expires afterwards.
+	if _, err := h.svc.DeclineDraft(context.Background(), b.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.Drafts(context.Background(), "pending"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "outbox", a.ID)); !os.IsNotExist(err) {
+		t.Fatalf("expired draft kept its copy: %v", err)
 	}
 }
 
@@ -407,4 +455,173 @@ func TestRestartFailsHalfSentDraftsAndCleansCopies(t *testing.T) {
 			t.Errorf("outbox/%s present = %v, want %v", name, err == nil, want)
 		}
 	}
+}
+
+func (h *outboxHarness) waitState(id, state string) store.Draft {
+	h.t.Helper()
+	var d store.Draft
+	watest.WaitFor(h.t, "draft "+id+" "+state, func() bool {
+		var err error
+		d, err = h.svc.Draft(context.Background(), id)
+		return err == nil && d.State == state
+	})
+	return d
+}
+
+func (h *outboxHarness) approve(id string) {
+	h.t.Helper()
+	if _, err := h.svc.ApproveDraft(context.Background(), id, "desktop"); err != nil {
+		h.t.Fatalf("ApproveDraft(%s) = %v", id, err)
+	}
+}
+
+func TestApprovedTextGoesOutOnce(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "chego às 15h"})
+	h.approve(d.ID)
+	d = h.waitState(d.ID, "sent")
+	c := h.client()
+	sent := c.Sent()
+	if len(sent) != 1 || sent[0].To.String() != chatA || sent[0].Message.GetConversation() != "chego às 15h" {
+		t.Fatalf("sent = %+v", sent)
+	}
+	if p := c.Presences(); len(p) != 2 || p[0] != "composing "+chatA || p[1] != "paused "+chatA {
+		t.Fatalf("presences = %v; want composing then paused", p)
+	}
+	// 1 s plus 50 ms for each of the 12 characters.
+	if w := h.clock.Waits(); len(w) != 1 || w[0] != 1600*time.Millisecond {
+		t.Fatalf("typing wait = %v, want [1.6s]", w)
+	}
+	if d.MessageID == nil || *d.MessageID != "3EB0SENT1" || d.Error != nil {
+		t.Fatalf("sent draft = %+v", d)
+	}
+	page, err := h.svc.Messages(context.Background(), store.MessagesQuery{Chat: chatA, Limit: 10})
+	if err != nil || len(page.Messages) != 2 {
+		t.Fatalf("archive after send = %+v, %v", page.Messages, err)
+	}
+	if m := page.Messages[1]; m.ID != "3EB0SENT1" || !m.FromMe || m.Text != "chego às 15h" || m.Kind != "text" || m.At != "2026-11-24T12:00:05Z" {
+		t.Fatalf("archived send = %+v", m)
+	}
+}
+
+func TestTypingWaitIsCapped(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: strings.Repeat("a", 500)})
+	h.approve(d.ID)
+	h.waitState(d.ID, "sent")
+	if w := h.clock.Waits(); len(w) != 1 || w[0] != 6*time.Second {
+		t.Fatalf("typing wait = %v, want [6s]", w)
+	}
+}
+
+func TestReplyQuotesTheMessage(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "pode ser amanhã?")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "pode", ReplyTo: "M1"})
+	h.approve(d.ID)
+	h.waitState(d.ID, "sent")
+	msg := h.client().Sent()[0].Message
+	ext := msg.GetExtendedTextMessage()
+	ci := ext.GetContextInfo()
+	if ext.GetText() != "pode" || ci.GetStanzaID() != "M1" || ci.GetParticipant() != chatA || ci.GetQuotedMessage().GetConversation() != "pode ser amanhã?" {
+		t.Fatalf("reply = %v", msg)
+	}
+	page, _ := h.svc.Messages(context.Background(), store.MessagesQuery{Chat: chatA, Limit: 10})
+	if m := page.Messages[1]; m.ReplyTo == nil || *m.ReplyTo != "M1" {
+		t.Fatalf("archived reply = %+v", m)
+	}
+}
+
+func TestGroupReplyQuotesTheAuthor(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	group := types.NewJID("120363000000000001", types.GroupServer)
+	author := types.NewJID("556477776666", types.DefaultUserServer)
+	h.emit(&events.Message{Info: types.MessageInfo{
+		MessageSource: types.MessageSource{Chat: group, Sender: author, IsGroup: true}, ID: "G1", Timestamp: h.clock.Now(),
+	}, Message: &waE2E.Message{Conversation: proto.String("quem leva o bolo?")}})
+	d := h.mustDraft(DraftRequest{Chat: group.String(), Text: "eu", ReplyTo: "G1"})
+	h.approve(d.ID)
+	h.waitState(d.ID, "sent")
+	sent := h.client().Sent()[0]
+	if sent.To != group || sent.Message.GetExtendedTextMessage().GetContextInfo().GetParticipant() != author.String() {
+		t.Fatalf("group reply = to %s %v", sent.To, sent.Message)
+	}
+}
+
+func TestApprovedFileGoesAsOneDocument(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "manda o arquivo")
+	zip := writeFile(t, filepath.Join(t.TempDir(), "entrega.zip"), "PK-zip")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "segue o zip", File: zip})
+	h.approve(d.ID)
+	h.waitState(d.ID, "sent")
+	c := h.client()
+	if up := c.Uploads(); len(up) != 1 || string(up[0]) != "PK-zip" {
+		t.Fatalf("uploads = %q", up)
+	}
+	sent := c.Sent()
+	doc := sent[0].Message.GetDocumentMessage()
+	if len(sent) != 1 || doc.GetFileName() != "entrega.zip" || doc.GetCaption() != "segue o zip" || doc.GetMimetype() != "application/zip" ||
+		doc.GetDirectPath() != "/v/t62/d1" || doc.GetFileLength() != 6 || len(doc.GetMediaKey()) != 32 {
+		t.Fatalf("document = %v", sent[0].Message)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "outbox", d.ID)); !os.IsNotExist(err) {
+		t.Fatalf("copy still in outbox/: %v", err)
+	}
+	page, _ := h.svc.Messages(context.Background(), store.MessagesQuery{Chat: chatA, Limit: 10})
+	m := page.Messages[1]
+	if m.Kind != "document" || m.Text != "segue o zip" || m.MediaPath == nil {
+		t.Fatalf("archived document = %+v", m)
+	}
+	if b, err := os.ReadFile(*m.MediaPath); err != nil || string(b) != "PK-zip" {
+		t.Fatalf("archived file = %q, %v", b, err)
+	}
+}
+
+func TestFailedSendIsNotRetried(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	c := h.client()
+	c.FailSend(fmt.Errorf("%w %d", whatsmeow.ErrServerReturnedError, 463))
+	locked := h.mustDraft(DraftRequest{Chat: chatA, Text: "primeira"})
+	h.approve(locked.ID)
+	d := h.waitState(locked.ID, "failed")
+	if d.Error == nil || *d.Error != "reachout_locked" || d.WACode == nil || *d.WACode != 463 || d.MessageID != nil {
+		t.Fatalf("463 = %+v", d)
+	}
+	c.FailSend(errors.New("websocket closed"))
+	other := h.mustDraft(DraftRequest{Chat: chatA, Text: "segunda"})
+	h.approve(other.ID)
+	d = h.waitState(other.ID, "failed")
+	if d.Error == nil || !strings.Contains(*d.Error, "websocket closed") || d.WACode != nil {
+		t.Fatalf("network failure = %+v", d)
+	}
+	// Give a retry loop room to show up: the archive watcher wakes on its own events only.
+	if n := len(c.Sent()); n != 2 {
+		t.Fatalf("SendMessage called %d times for 2 drafts; a failure must not be sent again", n)
+	}
+	if page, _ := h.svc.Messages(context.Background(), store.MessagesQuery{Chat: chatA, Limit: 10}); len(page.Messages) != 1 {
+		t.Fatalf("failed sends reached the archive: %+v", page.Messages)
+	}
+}
+
+func TestReachoutTimelockStopsSends(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "oi"})
+	ends := time.Date(2026, 11, 25, 8, 0, 0, 0, time.UTC)
+	h.client().Emit(&events.NotifyAccountReachoutTimelock{IsActive: true, TimeEnforcementEnds: jsontime.UnixString{Time: ends}})
+	watest.WaitFor(t, "the lock", func() bool {
+		u := h.status().ReachoutLockedUntil
+		return u != nil && *u == "2026-11-25T08:00:00Z"
+	})
+	if _, err := h.svc.ApproveDraft(context.Background(), d.ID, "desktop"); !errors.Is(err, ErrReachoutLocked) {
+		t.Fatalf("send while locked = %v, want ErrReachoutLocked", err)
+	}
+	h.client().Emit(&events.NotifyAccountReachoutTimelock{IsActive: false})
+	watest.WaitFor(t, "the lock to lift", func() bool { return h.status().ReachoutLockedUntil == nil })
+	h.approve(d.ID)
+	h.waitState(d.ID, "sent")
 }

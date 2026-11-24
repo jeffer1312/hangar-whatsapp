@@ -1,5 +1,5 @@
-// hangar-whatsapp links as a WhatsApp companion device and only archives: messages, history and
-// media go to --data, readable through a signed API on loopback. It never sends a message.
+// hangar-whatsapp links as a WhatsApp companion device and archives messages, history and media in
+// --data, readable through a signed API on loopback. It sends only drafts the owner approved.
 package main
 
 import (

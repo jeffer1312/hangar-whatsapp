@@ -5,16 +5,25 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/jeffer1312/hangar-whatsapp/internal/store"
 )
@@ -158,12 +167,11 @@ func contactName(ctx context.Context, dev *wastore.Device, jid types.JID, archiv
 	return archived, ""
 }
 
-// expire closes overdue drafts and, when any closed, deletes their copies.
+// expire closes overdue drafts and deletes the copies of every final draft, also those another
+// transaction (a decline, a creation) expired along the way.
 func (s *Service) expire(ctx context.Context, in *instance) error {
-	n, err := in.db.ExpireDrafts(ctx, s.now())
-	if err == nil && n > 0 {
-		s.sweep(ctx, in, false)
-	}
+	_, err := in.db.ExpireDrafts(ctx, s.now())
+	s.sweep(ctx, in, false)
 	return err
 }
 
@@ -284,6 +292,9 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		if errors.Is(err, store.ErrExpired) {
 			s.sweep(ctx, in, false)
 		}
+		if err == nil {
+			in.wg.Go(func() { s.deliver(in, cli, d) })
+		}
 		return d, err
 	})
 }
@@ -291,14 +302,211 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 func (s *Service) DeclineDraft(ctx context.Context, id string) (store.Draft, error) {
 	return with(s, func(in *instance) (store.Draft, error) {
 		d, err := in.db.Decline(ctx, id, s.now())
-		switch {
-		case err == nil:
-			if err := os.RemoveAll(filepath.Join(outboxDir(s.opt.Dir), id)); err != nil {
-				s.opt.Log.Error("apagar cópia do anexo", "rascunho", id, "erro", err)
-			}
-		case errors.Is(err, store.ErrExpired):
-			s.sweep(ctx, in, false)
-		}
+		s.sweep(ctx, in, false)
 		return d, err
 	})
+}
+
+// A 100 MB upload on a slow link still fits.
+const sendTimeout = 10 * time.Minute
+
+// typingFor is how long "typing…" shows before the message: about a person's pace, capped.
+func typingFor(text string) time.Duration {
+	return min(time.Second+time.Duration(utf8.RuneCountInString(text))*50*time.Millisecond, 6*time.Second)
+}
+
+func wait(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+var serverCode = regexp.MustCompile(`(\d+)$`)
+
+// failure is what the draft records: 463 and 475 mean WhatsApp locked messages to new contacts,
+// and insisting after them is what gets an account banned.
+func failure(err error) (string, int) {
+	if !errors.Is(err, whatsmeow.ErrServerReturnedError) {
+		return err.Error(), 0
+	}
+	code := 0
+	if m := serverCode.FindStringSubmatch(err.Error()); m != nil {
+		code, _ = strconv.Atoi(m[1])
+	}
+	if code == 463 || code == 475 {
+		return "reachout_locked", code
+	}
+	return err.Error(), code
+}
+
+// deliver sends an approved draft once. Whatever happens it ends in sent or failed, never back in
+// pending: a failed draft is not sent again.
+func (s *Service) deliver(in *instance, cli Client, d store.Draft) {
+	ctx, cancel := context.WithTimeout(in.ctx, sendTimeout)
+	defer cancel()
+	copyDir := filepath.Join(outboxDir(s.opt.Dir), d.ID)
+	defer os.RemoveAll(copyDir)
+	to, msg, resp, err := s.transmit(ctx, cli, d, copyDir)
+	// The draft's final state is written even when the service is stopping.
+	done := context.WithoutCancel(ctx)
+	if err != nil {
+		reason, code := failure(err)
+		s.opt.Log.Error("envio não saiu; sem reenvio", "rascunho", d.ID, "erro", err)
+		if err := in.db.FinishFailed(done, d.ID, reason, code); err != nil {
+			s.opt.Log.Error("gravar falha do envio", "rascunho", d.ID, "erro", err)
+		}
+		return
+	}
+	s.opt.Log.Info("mensagem enviada", "rascunho", d.ID, "origem", d.Origin)
+	rec, media := s.archived(cli, d, to, msg, resp, copyDir)
+	if err := in.db.FinishSent(done, d.ID, rec, media); err != nil {
+		s.opt.Log.Error("gravar envio feito", "rascunho", d.ID, "erro", err)
+	}
+}
+
+func (s *Service) transmit(ctx context.Context, cli Client, d store.Draft, copyDir string) (types.JID, *waE2E.Message, whatsmeow.SendResponse, error) {
+	var resp whatsmeow.SendResponse
+	to, err := types.ParseJID(d.Address)
+	if err != nil {
+		return to, nil, resp, fmt.Errorf("endereço da conversa ilegível: %w", err)
+	}
+	if err := cli.SendChatPresence(ctx, to, types.ChatPresenceComposing, types.ChatPresenceMediaText); err != nil {
+		return to, nil, resp, fmt.Errorf("mostrar digitando: %w", err)
+	}
+	if err := s.opt.Wait(ctx, typingFor(d.Text)); err != nil {
+		return to, nil, resp, err
+	}
+	if err := cli.SendChatPresence(ctx, to, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
+		return to, nil, resp, fmt.Errorf("parar de mostrar digitando: %w", err)
+	}
+	quote := quoteContext(cli, d)
+	var msg *waE2E.Message
+	switch {
+	case d.File != nil:
+		doc, err := upload(ctx, cli, filepath.Join(copyDir, d.File.Name), d.File.Name)
+		if err != nil {
+			return to, nil, resp, err
+		}
+		if d.Text != "" {
+			doc.Caption = proto.String(d.Text)
+		}
+		doc.ContextInfo = quote
+		msg = &waE2E.Message{DocumentMessage: doc}
+	case quote != nil:
+		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(d.Text), ContextInfo: quote}}
+	default:
+		msg = &waE2E.Message{Conversation: proto.String(d.Text)}
+	}
+	resp, err = cli.SendMessage(ctx, to, msg)
+	return to, msg, resp, err
+}
+
+func upload(ctx context.Context, cli Client, path, name string) (*waE2E.DocumentMessage, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("abrir a cópia do anexo: %w", err)
+	}
+	defer f.Close()
+	up, err := cli.UploadReader(ctx, f, nil, whatsmeow.MediaDocument)
+	if err != nil {
+		return nil, fmt.Errorf("subir o anexo: %w", err)
+	}
+	mimetype, _, _ := strings.Cut(mime.TypeByExtension(filepath.Ext(name)), ";")
+	return &waE2E.DocumentMessage{
+		URL: proto.String(up.URL), DirectPath: proto.String(up.DirectPath), MediaKey: up.MediaKey,
+		FileSHA256: up.FileSHA256, FileEncSHA256: up.FileEncSHA256, FileLength: proto.Uint64(up.FileLength),
+		Mimetype: proto.String(cmp.Or(strings.TrimSpace(mimetype), "application/octet-stream")), FileName: proto.String(name),
+	}, nil
+}
+
+// quoteContext cites the replied message as WhatsApp clients do: its id, its author and its content.
+func quoteContext(cli Client, d store.Draft) *waE2E.ContextInfo {
+	if d.ReplyTo == nil {
+		return nil
+	}
+	ctx := &waE2E.ContextInfo{StanzaID: proto.String(*d.ReplyTo)}
+	var o original
+	if json.Unmarshal([]byte(d.QuotedRaw), &o) != nil {
+		return ctx
+	}
+	author, err := types.ParseJID(o.Sender)
+	if err != nil || author.IsEmpty() {
+		author, _ = types.ParseJID(o.Chat)
+		if o.FromMe {
+			if own := cli.Device().ID; own != nil {
+				author = *own
+			}
+		}
+	}
+	if !author.IsEmpty() {
+		ctx.Participant = proto.String(author.ToNonAD().String())
+	}
+	var quoted waE2E.Message
+	if protojson.Unmarshal(o.Message, &quoted) == nil {
+		ctx.QuotedMessage = &quoted
+	}
+	return ctx
+}
+
+// archived is the sent message as the archive keeps it; the attachment's copy moves into media/
+// instead of being downloaded back.
+func (s *Service) archived(cli Client, d store.Draft, to types.JID, msg *waE2E.Message, resp whatsmeow.SendResponse, copyDir string) (store.Record, string) {
+	c := contentOf(msg)
+	at := resp.Timestamp
+	if at.IsZero() {
+		at = s.now()
+	}
+	sender := ""
+	if own := cli.Device().ID; own != nil {
+		sender = own.String()
+	}
+	body, err := protojson.Marshal(msg)
+	if err != nil {
+		s.opt.Log.Error("serializar mensagem enviada", "erro", err)
+	}
+	raw, _ := json.Marshal(original{Chat: to.String(), Sender: sender, FromMe: true, Group: to.Server == types.GroupServer, Message: body})
+	rec := store.Record{Chat: d.Chat, ID: resp.ID, FromMe: true, At: at, Kind: c.kind, Text: c.text, Mime: c.mime,
+		ReplyTo: c.replyTo, Raw: string(raw)}
+	if d.File == nil {
+		return rec, ""
+	}
+	rel := store.MediaRel(d.Chat, resp.ID, c.ext)
+	dest, ok := store.MediaAbs(s.opt.Dir, rel)
+	if !ok {
+		return rec, ""
+	}
+	if err := os.MkdirAll(filepath.Dir(dest), 0o700); err != nil {
+		s.opt.Log.Warn("guardar anexo enviado; ele será baixado de volta", "erro", err)
+		return rec, ""
+	}
+	if err := os.Rename(filepath.Join(copyDir, d.File.Name), dest); err != nil {
+		s.opt.Log.Warn("guardar anexo enviado; ele será baixado de volta", "erro", err)
+		return rec, ""
+	}
+	return rec, rel
+}
+
+// lockReachout records WhatsApp's lock on messages to new contacts; an active lock without an end
+// holds for a day.
+func (s *Service) lockReachout(in *instance, e *events.NotifyAccountReachoutTimelock) {
+	until := ""
+	if e.IsActive {
+		ends := e.TimeEnforcementEnds.Time
+		if ends.IsZero() {
+			ends = s.now().Add(24 * time.Hour)
+		}
+		until = ends.UTC().Format(store.TimeLayout)
+		s.opt.Log.Error("o WhatsApp travou mensagens a contatos novos; envios recusados até o fim da trava",
+			"até", until, "tipo", e.EnforcementType)
+	} else {
+		s.opt.Log.Info("o WhatsApp tirou a trava de mensagens a contatos novos")
+	}
+	if err := in.db.SetReachoutLock(in.ctx, until); err != nil {
+		s.opt.Log.Error("gravar trava do WhatsApp", "erro", err)
+	}
 }
