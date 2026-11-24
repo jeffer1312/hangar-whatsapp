@@ -32,9 +32,16 @@ type env struct {
 
 func newEnv(t *testing.T, paired bool) *env {
 	t.Helper()
+	return newEnvAt(t, paired, func() time.Time { return now })
+}
+
+// newEnvAt gives the service its own clock; signatures keep using now.
+func newEnvAt(t *testing.T, paired bool, svcNow func() time.Time) *env {
+	t.Helper()
 	e := &env{t: t, clients: watest.NewFactory(paired)}
 	svc, err := wa.Open(context.Background(), wa.Options{Dir: t.TempDir(), Version: "0.1.0",
-		Now: func() time.Time { return now }, NewClient: func(d *wastore.Device, l waLog.Logger) wa.Client { return e.clients.New(d, l) }})
+		Now: svcNow, NewClient: func(d *wastore.Device, l waLog.Logger) wa.Client { return e.clients.New(d, l) },
+		Wait: func(context.Context, time.Duration) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

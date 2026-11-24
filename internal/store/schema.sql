@@ -43,6 +43,53 @@ CREATE TABLE IF NOT EXISTS media_requests (
 CREATE INDEX IF NOT EXISTS media_requests_message ON media_requests (chat, id);
 CREATE INDEX IF NOT EXISTS media_requests_requested_at ON media_requests (requested_at);
 
+-- Drafts the owner approves in the Hangar before anything is sent; the copy of an attachment lives
+-- in outbox/<id>/ until the draft reaches a final state.
+CREATE TABLE IF NOT EXISTS outbox (
+	id TEXT PRIMARY KEY,
+	-- sha256 of origin, chat, text and the attachment's sha256: a pending twin is returned, not repeated.
+	dedup TEXT NOT NULL,
+	origin TEXT NOT NULL,
+	chat TEXT NOT NULL,
+	-- Where the message goes: the chat as WhatsApp knows it (raw.chat of the chat's newest message).
+	address TEXT NOT NULL,
+	-- contact or group
+	chat_kind TEXT NOT NULL,
+	chat_number TEXT NOT NULL,
+	chat_name TEXT NOT NULL DEFAULT '',
+	-- contact, push, group or empty
+	chat_name_source TEXT NOT NULL DEFAULT '',
+	-- JSON array of the chat's last messages when the draft was made.
+	recent TEXT NOT NULL,
+	text TEXT NOT NULL,
+	reply_to TEXT,
+	quoted_text TEXT,
+	quoted_raw TEXT,
+	file_name TEXT,
+	file_size INTEGER,
+	file_sha256 TEXT,
+	file_source TEXT,
+	file_outside_cwd INTEGER,
+	created_at TEXT NOT NULL,
+	expires_at TEXT NOT NULL,
+	-- pending, sending, sent, declined, expired, failed
+	state TEXT NOT NULL,
+	via TEXT,
+	answered_at TEXT,
+	message_id TEXT,
+	error TEXT,
+	wa_code INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS outbox_state ON outbox (state, created_at);
+-- The send caps count what left pending to be sent, by when it was approved.
+CREATE INDEX IF NOT EXISTS outbox_sends ON outbox (answered_at) WHERE state IN ('sending', 'sent', 'failed');
+
+CREATE TABLE IF NOT EXISTS settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+
 CREATE VIEW IF NOT EXISTS chats AS
 SELECT m.chat, coalesce(c.name, '') AS name, count(*) AS messages, min(m.at) AS first_at, max(m.at) AS last_at
 FROM messages m LEFT JOIN contacts c ON c.jid = m.chat

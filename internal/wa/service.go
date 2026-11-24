@@ -70,6 +70,8 @@ type Options struct {
 	// NewClient gets the logger whatsmeow must write to: the service watches some of its warnings.
 	NewClient func(*wastore.Device, waLog.Logger) Client
 	Log       *slog.Logger
+	// Wait holds the typing indicator before a send; tests skip it.
+	Wait func(ctx context.Context, d time.Duration) error
 }
 
 type StatusError struct {
@@ -91,6 +93,16 @@ type Status struct {
 	Totals            store.Totals `json:"totals"`
 	Since             *string      `json:"since"`
 	LastMessageAt     *string      `json:"last_message_at"`
+	Outgoing          Outgoing     `json:"send"`
+	// Until when WhatsApp refuses messages to new contacts; null without a lock.
+	ReachoutLockedUntil *string `json:"reachout_locked_until"`
+}
+
+type Outgoing struct {
+	LastMinute int `json:"last_minute"`
+	Today      int `json:"today"`
+	PerMinute  int `json:"per_minute"`
+	PerDay     int `json:"per_day"`
 }
 
 // instance is everything opened on the data folder; wipe closes it and opens a new one.
@@ -197,7 +209,11 @@ func (s *Service) start() (err error) {
 		in.wg.Go(func() { s.connect(in.ctx, g, cli) })
 	}
 	s.mu.Unlock()
+	if err := s.recoverOutbox(in); err != nil {
+		s.opt.Log.Error("recuperar rascunhos", "erro", err)
+	}
 	in.wg.Go(func() { in.media.run(in.ctx) })
+	in.wg.Go(func() { s.expireLoop(in) })
 	return nil
 }
 
@@ -514,6 +530,7 @@ func (s *Service) Wipe(ctx context.Context) (string, error) {
 		store.RemoveDB(store.MessagesPath(s.opt.Dir)),
 		store.RemoveDB(store.SessionPath(s.opt.Dir)),
 		os.RemoveAll(filepath.Join(s.opt.Dir, "media")),
+		os.RemoveAll(outboxDir(s.opt.Dir)),
 		s.start(),
 	}
 	return result, errors.Join(errs...)
@@ -546,8 +563,18 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 		if err != nil {
 			return Status{}, err
 		}
+		minute, day, err := in.db.CountSends(ctx, s.now())
+		if err != nil {
+			return Status{}, err
+		}
+		locked, err := s.reachoutLocked(ctx, in)
+		if err != nil {
+			return Status{}, err
+		}
 		st := Status{API: API, Version: s.opt.Version, TZ: s.tz, Totals: sum.Totals,
-			Since: optional(sum.Since), LastMessageAt: optional(sum.LastMessageAt)}
+			Since: optional(sum.Since), LastMessageAt: optional(sum.LastMessageAt),
+			Outgoing:            Outgoing{LastMinute: minute, Today: day, PerMinute: store.SendsPerMinute, PerDay: store.SendsPerDay},
+			ReachoutLockedUntil: optional(locked)}
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		st.State = s.state

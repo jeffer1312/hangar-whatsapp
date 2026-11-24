@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 )
@@ -20,7 +21,15 @@ type Record struct {
 // Save never replaces what is there; only a row without a media file is redone, so media the
 // ProChat could not fetch gets another chance.
 func (d *DB) Save(ctx context.Context, r Record) error {
-	_, err := d.w.ExecContext(ctx, `INSERT INTO messages (chat, id, sender, from_me, at, kind, text,
+	return save(ctx, d.w, r)
+}
+
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+func save(ctx context.Context, ex execer, r Record) error {
+	_, err := ex.ExecContext(ctx, `INSERT INTO messages (chat, id, sender, from_me, at, kind, text,
 			media_mime, reply_to, source, raw)
 		VALUES (?, ?, ?, ?, ?, ?, ?, nullif(?, ''), nullif(?, ''), 'whatsapp', ?)
 		ON CONFLICT (chat, id) DO UPDATE SET kind = excluded.kind, text = excluded.text,

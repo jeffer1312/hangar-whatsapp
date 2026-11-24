@@ -18,7 +18,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // TimeLayout is UTC with Z; every stored time uses it so text order is time order.
 const TimeLayout = "2006-01-02T15:04:05Z"
@@ -42,7 +42,8 @@ func MessagesPath(dir string) string { return filepath.Join(dir, "messages.db") 
 // OpenSQLite opens a writer: one connection, because SQLite has one writer at a time.
 func OpenSQLite(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+
-		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"+
+		"&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
