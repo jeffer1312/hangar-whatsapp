@@ -33,6 +33,22 @@ func resolved(path string) string {
 	return path
 }
 
+// visiblePart is what the hidden-component rule checks: inside ~/.hangar/worktrees, where the Hangar
+// opens sessions on the user's own code, only the part below that folder.
+func visiblePart(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	trees := filepath.Join(home, ".hangar", "worktrees")
+	for _, root := range []string{trees, resolved(trees)} {
+		if rel, err := filepath.Rel(root, path); err == nil && rel != "." && within(path, root) {
+			return rel
+		}
+	}
+	return path
+}
+
 // refusal says why path may not be attached, or "". The hidden-component rule covers ~/.hangar,
 // ~/.ssh, ~/.gnupg, ~/.config, ~/.claude* and .env*.
 func refusal(path, dataDir string) string {
@@ -42,7 +58,7 @@ func refusal(path, dataDir string) string {
 	if systemPath(path) {
 		return "é arquivo do sistema, não de usuário"
 	}
-	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+	for _, part := range strings.Split(filepath.ToSlash(visiblePart(path)), "/") {
 		if strings.HasPrefix(part, ".") {
 			return "fica em pasta ou arquivo oculto (" + part + ")"
 		}

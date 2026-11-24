@@ -164,7 +164,9 @@ Anexo (`file`):
 
 - Caminho absoluto (senão 400 `bad_request`), arquivo comum de até 100 MB (`file_too_large`).
 - `file_refused` para: a pasta `--data`; qualquer parte do caminho começando por ponto (cobre `~/.hangar`,
-  `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.claude*` e `.env*`); `*.key` e `*.pem`; `/proc`, `/sys` e `/dev`;
+  `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.claude*` e `.env*`), exceto `~/.hangar/worktrees/`, onde o Hangar abre
+  sessões no código do usuário e a regra vale só do que vem abaixo dela (`.git`, `.env`); `*.key` e `*.pem`;
+  `/proc`, `/sys` e `/dev`;
   link simbólico no último trecho; pasta, FIFO e afins; arquivo que não existe. As regras valem para o caminho
   pedido e para o caminho com as pastas resolvidas.
 - O arquivo é aberto sem seguir link (`O_NOFOLLOW`; no Windows, conferência com `Lstat` logo antes) e copiado do
@@ -182,11 +184,19 @@ Envio (depois do 202, fora do pedido HTTP):
 
 O endereço é o da mensagem mais recente da conversa como o WhatsApp a conhece, não a chave normalizada do
 arquivo. No sucesso, `message_id` recebe o id da mensagem e ela entra em `/v1/messages` com `from_me` true.
-Qualquer falha deixa `failed`, sem reenvio: `wa_code` é o código que o WhatsApp devolveu, quando houve, e
-`error` é `reachout_locked` para 463 e 475 (trava de contato novo) ou o texto do erro.
+Qualquer falha deixa `failed`, sem reenvio. `wa_code` é o código que o WhatsApp devolveu, quando houve.
+`error`:
+- `reachout_locked`: o WhatsApp recusou com 463 ou 475 (trava de contato novo), ou a trava chegou durante o
+  "digitando" e a mensagem não saiu;
+- `unconfirmed`: o envio foi cortado depois de a mensagem talvez ter saído (sem resposta do WhatsApp em 75 s,
+  serviço parando, rede caindo); a pessoa pode ter recebido;
+- `interrupted`: o serviço parou no meio, visto na subida seguinte;
+- senão, o texto do erro.
 
 Trava: quando o WhatsApp avisa a trava de mensagens a contatos novos, o serviço grava o fim dela
-(`reachout_locked_until` no status; aviso sem fim vale 24 h) e recusa `send` com `reachout_locked` até lá.
+(`reachout_locked_until` no status; aviso sem fim vale 24 h) e recusa `send` com `reachout_locked` até lá. Um 463
+ou 475 também trava por 24 h (ou até o fim já gravado, se for mais tarde): insistir depois dele leva a ban. A
+trava é conferida de novo logo antes da mensagem sair.
 
 Na subida, todo `sending` vira `failed` com `error = "interrupted"` (sem reenvio) e as cópias sem rascunho
 pendente são apagadas. O `wipe` apaga também `outbox/`.

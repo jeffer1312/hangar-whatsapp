@@ -328,10 +328,18 @@ func wait(ctx context.Context, d time.Duration) error {
 
 var serverCode = regexp.MustCompile(`(\d+)$`)
 
+// errUnconfirmed marks a send cut after the message may have left: the person may have it.
+var errUnconfirmed = errors.New("unconfirmed")
+
 // failure is what the draft records: 463 and 475 mean WhatsApp locked messages to new contacts,
 // and insisting after them is what gets an account banned.
 func failure(err error) (string, int) {
-	if !errors.Is(err, whatsmeow.ErrServerReturnedError) {
+	switch {
+	case errors.Is(err, ErrReachoutLocked):
+		return "reachout_locked", 0
+	case errors.Is(err, errUnconfirmed):
+		return "unconfirmed", 0
+	case !errors.Is(err, whatsmeow.ErrServerReturnedError):
 		return err.Error(), 0
 	}
 	code := 0
@@ -351,12 +359,15 @@ func (s *Service) deliver(in *instance, cli Client, d store.Draft) {
 	defer cancel()
 	copyDir := filepath.Join(outboxDir(s.opt.Dir), d.ID)
 	defer os.RemoveAll(copyDir)
-	to, msg, resp, err := s.transmit(ctx, cli, d, copyDir)
+	to, msg, resp, err := s.transmit(ctx, in, cli, d, copyDir)
 	// The draft's final state is written even when the service is stopping.
 	done := context.WithoutCancel(ctx)
 	if err != nil {
 		reason, code := failure(err)
 		s.opt.Log.Error("envio não saiu; sem reenvio", "rascunho", d.ID, "erro", err)
+		if code == 463 || code == 475 {
+			s.holdReachout(done, in, s.now().Add(24*time.Hour))
+		}
 		if err := in.db.FinishFailed(done, d.ID, reason, code); err != nil {
 			s.opt.Log.Error("gravar falha do envio", "rascunho", d.ID, "erro", err)
 		}
@@ -369,7 +380,7 @@ func (s *Service) deliver(in *instance, cli Client, d store.Draft) {
 	}
 }
 
-func (s *Service) transmit(ctx context.Context, cli Client, d store.Draft, copyDir string) (types.JID, *waE2E.Message, whatsmeow.SendResponse, error) {
+func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d store.Draft, copyDir string) (types.JID, *waE2E.Message, whatsmeow.SendResponse, error) {
 	var resp whatsmeow.SendResponse
 	to, err := types.ParseJID(d.Address)
 	if err != nil {
@@ -402,8 +413,30 @@ func (s *Service) transmit(ctx context.Context, cli Client, d store.Draft, copyD
 	default:
 		msg = &waE2E.Message{Conversation: proto.String(d.Text)}
 	}
+	// A lock may have arrived during the typing wait or the upload.
+	if until, err := s.reachoutLocked(ctx, in); err != nil {
+		return to, nil, resp, err
+	} else if until != "" {
+		return to, nil, resp, fmt.Errorf("%w até %s", ErrReachoutLocked, until)
+	}
 	resp, err = cli.SendMessage(ctx, to, msg)
+	if err != nil && !errors.Is(err, whatsmeow.ErrServerReturnedError) && (errors.Is(err, whatsmeow.ErrMessageTimedOut) || ctx.Err() != nil) {
+		err = fmt.Errorf("%w: %w", errUnconfirmed, err)
+	}
 	return to, msg, resp, err
+}
+
+// holdReachout locks sends until the given time unless a later lock is already recorded: a 463 or 475
+// comes without an end, and the next approval must not insist.
+func (s *Service) holdReachout(ctx context.Context, in *instance, until time.Time) {
+	next := until.UTC().Format(store.TimeLayout)
+	current, err := in.db.ReachoutLock(ctx)
+	if err == nil && current < next {
+		err = in.db.SetReachoutLock(ctx, next)
+	}
+	if err != nil {
+		s.opt.Log.Error("gravar trava depois da recusa do WhatsApp", "erro", err)
+	}
 }
 
 func upload(ctx context.Context, cli Client, path, name string) (*waE2E.DocumentMessage, error) {

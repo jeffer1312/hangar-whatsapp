@@ -32,12 +32,18 @@ type clock struct {
 	mu    sync.Mutex
 	now   time.Time
 	waits []time.Duration
+	// onWait runs during the typing wait, before the message goes.
+	onWait func()
 }
 
 func (c *clock) wait(ctx context.Context, d time.Duration) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.waits = append(c.waits, d)
+	fn := c.onWait
+	c.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 	return nil
 }
 
@@ -323,6 +329,29 @@ func TestDraftAttachmentRefusals(t *testing.T) {
 	}
 }
 
+func TestHangarWorktreesCanAttach(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	tree := filepath.Join(home, ".hangar", "worktrees", "hangar", "feat-x")
+	zip := writeFile(t, filepath.Join(tree, "dist", "entrega.zip"), "PK")
+	if d := h.mustDraft(DraftRequest{Chat: chatA, Text: "zip", File: zip, OriginCwd: tree}); d.File == nil || d.File.OutsideCwd {
+		t.Fatalf("worktree file = %+v", d.File)
+	}
+	for _, p := range []string{
+		writeFile(t, filepath.Join(tree, ".git", "config"), "x"),
+		writeFile(t, filepath.Join(tree, ".env"), "TOKEN=1"),
+		writeFile(t, filepath.Join(tree, "certs", "a.pem"), "x"),
+		writeFile(t, filepath.Join(home, ".hangar", "config", "notas.txt"), "x"),
+		writeFile(t, filepath.Join(home, ".hangar", "worktrees.txt"), "x"),
+	} {
+		if _, _, err := h.draft(DraftRequest{Chat: chatA, Text: p, File: p}); !errors.Is(err, ErrFileRefused) {
+			t.Errorf("%s: CreateDraft = %v, want ErrFileRefused", p, err)
+		}
+	}
+}
+
 func TestCopyOfADraftExpiredByAnotherAnswerIsDeleted(t *testing.T) {
 	h := newOutboxHarness(t, true)
 	h.receive("M1", "olá")
@@ -580,30 +609,70 @@ func TestApprovedFileGoesAsOneDocument(t *testing.T) {
 	}
 }
 
-func TestFailedSendIsNotRetried(t *testing.T) {
+func TestReachoutRefusalLocksFurtherSends(t *testing.T) {
 	h := newOutboxHarness(t, true)
 	h.receive("M1", "olá")
 	c := h.client()
 	c.FailSend(fmt.Errorf("%w %d", whatsmeow.ErrServerReturnedError, 463))
-	locked := h.mustDraft(DraftRequest{Chat: chatA, Text: "primeira"})
-	h.approve(locked.ID)
-	d := h.waitState(locked.ID, "failed")
+	first := h.mustDraft(DraftRequest{Chat: chatA, Text: "primeira"})
+	h.approve(first.ID)
+	d := h.waitState(first.ID, "failed")
 	if d.Error == nil || *d.Error != "reachout_locked" || d.WACode == nil || *d.WACode != 463 || d.MessageID != nil {
 		t.Fatalf("463 = %+v", d)
 	}
+	if u := h.status().ReachoutLockedUntil; u == nil || *u != "2026-11-25T12:00:00Z" {
+		t.Fatalf("lock after 463 = %v, want a day", u)
+	}
+	// Insisting after a 463 is what gets an account banned: the next approval is refused.
+	again := h.mustDraft(DraftRequest{Chat: chatA, Text: "de novo"})
+	if _, err := h.svc.ApproveDraft(context.Background(), again.ID, "desktop"); !errors.Is(err, ErrReachoutLocked) {
+		t.Fatalf("send after 463 = %v, want ErrReachoutLocked", err)
+	}
+	if n := len(c.Sent()); n != 1 {
+		t.Fatalf("SendMessage called %d times, want 1", n)
+	}
+	if page, _ := h.svc.Messages(context.Background(), store.MessagesQuery{Chat: chatA, Limit: 10}); len(page.Messages) != 1 {
+		t.Fatalf("a failed send reached the archive: %+v", page.Messages)
+	}
+}
+
+func TestFailedSendIsNotRetried(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	c := h.client()
 	c.FailSend(errors.New("websocket closed"))
-	other := h.mustDraft(DraftRequest{Chat: chatA, Text: "segunda"})
-	h.approve(other.ID)
-	d = h.waitState(other.ID, "failed")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "segunda"})
+	h.approve(d.ID)
+	d = h.waitState(d.ID, "failed")
 	if d.Error == nil || !strings.Contains(*d.Error, "websocket closed") || d.WACode != nil {
 		t.Fatalf("network failure = %+v", d)
 	}
-	// Give a retry loop room to show up: the archive watcher wakes on its own events only.
+	// What may have reached WhatsApp says so: the person may have the message.
+	c.FailSend(whatsmeow.ErrMessageTimedOut)
+	u := h.mustDraft(DraftRequest{Chat: chatA, Text: "terceira"})
+	h.approve(u.ID)
+	if u = h.waitState(u.ID, "failed"); u.Error == nil || *u.Error != "unconfirmed" {
+		t.Fatalf("timed-out send = %+v, want error unconfirmed", u)
+	}
 	if n := len(c.Sent()); n != 2 {
 		t.Fatalf("SendMessage called %d times for 2 drafts; a failure must not be sent again", n)
 	}
-	if page, _ := h.svc.Messages(context.Background(), store.MessagesQuery{Chat: chatA, Limit: 10}); len(page.Messages) != 1 {
-		t.Fatalf("failed sends reached the archive: %+v", page.Messages)
+}
+
+func TestLockArrivingWhileTypingStopsTheSend(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	h.clock.onWait = func() {
+		h.client().Emit(&events.NotifyAccountReachoutTimelock{IsActive: true,
+			TimeEnforcementEnds: jsontime.UnixString{Time: time.Date(2026, 11, 25, 8, 0, 0, 0, time.UTC)}})
+	}
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "oi"})
+	h.approve(d.ID)
+	if d = h.waitState(d.ID, "failed"); d.Error == nil || *d.Error != "reachout_locked" {
+		t.Fatalf("send with a lock during typing = %+v", d)
+	}
+	if n := len(h.client().Sent()); n != 0 {
+		t.Fatalf("SendMessage called %d times under a lock", n)
 	}
 }
 
