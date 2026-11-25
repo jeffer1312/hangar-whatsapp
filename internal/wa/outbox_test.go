@@ -819,3 +819,50 @@ func TestReplacedClientCannotTouchTheReachoutLock(t *testing.T) {
 		t.Fatalf("a replaced client's notice set the lock to %s", *u)
 	}
 }
+
+func TestArchiveOwnerIsTheFirstPairedNumber(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	if owner, err := h.svc.in.db.Owner(context.Background()); err != nil || owner != watest.OwnJID.User {
+		t.Fatalf("owner = %q, %v; want the paired number %s", owner, err, watest.OwnJID.User)
+	}
+	if h.status().AccountChanged {
+		t.Fatal("account_changed with the owner paired")
+	}
+}
+
+func TestAnotherNumberCannotSendFromTheArchive(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ClaimOwner(context.Background(), "5511988887777"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	clk := &clock{now: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
+	h := &outboxHarness{harness: &harness{t: t, dir: dir, clients: watest.NewFactory(true)}, clock: clk}
+	h.svc = openOutbox(t, dir, clk, h.clients)
+	t.Cleanup(func() { h.svc.Close() })
+	h.receive("M1", "olá")
+	if !h.status().AccountChanged {
+		t.Fatal("status account_changed = false with another number paired")
+	}
+	if _, _, err := h.draft(DraftRequest{Chat: chatA, Text: "oi"}); !errors.Is(err, ErrAccountChanged) {
+		t.Fatalf("CreateDraft = %v, want ErrAccountChanged", err)
+	}
+	// A draft made while the owner was paired stays pending and is not sent.
+	if _, _, err := h.svc.in.db.CreateDraft(context.Background(), store.Draft{ID: "P1", Origin: "n::s", Chat: chatA,
+		Address: chatA, Text: "antes", ChatKind: "contact", ChatNumber: "556499990000", Recent: []store.Recent{}}, h.clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.ApproveDraft(context.Background(), "P1", "desktop"); !errors.Is(err, ErrAccountChanged) {
+		t.Fatalf("ApproveDraft = %v, want ErrAccountChanged", err)
+	}
+	if d, _ := h.svc.Draft(context.Background(), "P1"); d.State != "pending" {
+		t.Fatalf("draft after the refusal = %s, want pending", d.State)
+	}
+	if n := len(h.client().Sent()); n != 0 {
+		t.Fatalf("SendMessage called %d times by another number", n)
+	}
+}

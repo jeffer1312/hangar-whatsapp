@@ -90,7 +90,8 @@ Chrome (Linux)`) só vêm em `connected`; nos outros estados são null.
 
 `send`: `{"last_minute","today","per_minute":3,"per_day":20}`, envios aprovados no último minuto e nas
 últimas 24 h (janela móvel), contando os que falharam. `reachout_locked_until`: até quando o WhatsApp recusa
-mensagem a contato novo (UTC), ou null sem trava.
+mensagem a contato novo (UTC), ou null sem trava. `account_changed`: true quando o número pareado não é o dono
+do arquivo (ver "Dono do arquivo" em Saída); false fora de `connected`.
 
 `media_error` de uma mensagem: `expired` (só o celular tem; pode ser pedida), `phone_refused`, `unavailable`
 (o ProChat não tinha), `unreadable`, `lost`. `totals.media_phone_only` conta `expired`; `media_lost`, os
@@ -124,10 +125,10 @@ de erro das outras rotas. Horários em UTC, `2006-01-02T15:04:05Z`.
 
 | Rota | Sucesso | Erros próprios |
 |---|---|---|
-| `POST /v1/outbox` `{"chat","text","reply_to"?,"file"?,"origin","origin_cwd"?}` | 201 rascunho; 200 com o rascunho pendente igual, sem criar outro | 400 `bad_request`, `file_refused`; 409 `not_paired`, `outdated`, `unknown_chat`, `new_contact`, `unsupported_chat`; 413 `file_too_large`; 429 `too_many_drafts` |
+| `POST /v1/outbox` `{"chat","text","reply_to"?,"file"?,"origin","origin_cwd"?}` | 201 rascunho; 200 com o rascunho pendente igual, sem criar outro | 400 `bad_request`, `file_refused`; 409 `not_paired`, `outdated`, `account_changed`, `unknown_chat`, `new_contact`, `unsupported_chat`; 413 `file_too_large`; 429 `too_many_drafts` |
 | `GET /v1/outbox?state=pending` | 200 `{"drafts":[…]}`, os 100 mais novos | 400 sem `state` válido |
 | `GET /v1/outbox/{id}` | 200 rascunho | 404 `not_found` |
-| `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`, `reachout_locked`; 429 `rate_limited` |
+| `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`, `account_changed`, `reachout_locked`; 429 `rate_limited` |
 | `POST /v1/outbox/{id}/decline` | 200 rascunho em `declined` | 404 `not_found`; 409 `expired`, `answered` |
 
 Rascunho:
@@ -142,8 +143,13 @@ Rascunho:
 - `state`: `pending`, `sending`, `sent`, `declined`, `expired`, `failed`. Só `pending` aceita `send` e `decline`;
   depois disso o rascunho só muda sozinho (`sending` vira `sent` ou `failed`).
 - `chat`: JID ou número com DDI. `unknown_chat`: a conversa não está no arquivo. `new_contact`: a pessoa nunca
-  escreveu para a conta (nenhuma mensagem com `from_me = 0`). `unsupported_chat`: lista de transmissão e canal.
-  Grupo é aceito.
+  escreveu para a conta (nenhuma mensagem com `from_me = 0`; só vale com o dono do arquivo pareado, ver abaixo).
+  `unsupported_chat`: lista de transmissão e canal. Grupo é aceito.
+- Dono do arquivo: o `messages.db` guarda o número da conta que o montou, gravado na primeira vez que o serviço
+  roda pareado sem dono (um arquivo da 0.1.x pareado grava o número atual; um já despareado grava o próximo
+  número pareado). `logout` mantém o dono; `wipe` apaga. Pareado com outro número, criar e enviar respondem 409
+  `account_changed` (o rascunho pendente fica pendente até expirar), porque as mensagens do arquivo são da outra
+  conta. Para enviar com o número novo: `wipe` e pareamento.
 - `chat_number`: os dígitos do contato; para grupo (e conversa só por `@lid`), o JID inteiro. `chat_name_source`:
   `contact` (agenda do celular), `push` (nome que a própria pessoa escolheu, ou o da empresa), `group`, ou vazio
   quando o nome só existe no arquivo, sem origem conhecida.
@@ -169,7 +175,8 @@ Anexo (`file`):
   `/proc`, `/sys` e `/dev`;
   link simbólico no último trecho; pasta, FIFO e afins; arquivo que não existe. As regras valem para o caminho
   pedido e para o caminho com as pastas resolvidas.
-- O arquivo é aberto sem seguir link (`O_NOFOLLOW`; no Windows, conferência com `Lstat` logo antes) e copiado do
+- O arquivo é aberto sem seguir link (`O_NOFOLLOW`; no Windows, aberto como ponto de nova análise, recusado se for
+  link ou junção, e reaberto conferindo que é o mesmo arquivo) e copiado do
   descritor já conferido para `outbox/<id>/<nome>` (pasta 0700), com sha256. A cópia é o que sai: mudar o original
   depois não muda o envio. Ela some quando o rascunho chega a estado final; no envio feito, vai para `media/`.
 - `source` é o caminho com as pastas resolvidas. `outside_cwd` é true quando o arquivo não está dentro de

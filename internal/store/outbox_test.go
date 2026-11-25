@@ -323,6 +323,20 @@ func TestReachoutLockOnlyGrows(t *testing.T) {
 	}
 }
 
+func TestOwnerIsClaimedOnce(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	if owner, err := db.Owner(ctx); err != nil || owner != "" {
+		t.Fatalf("fresh owner = %q, %v", owner, err)
+	}
+	if owner, err := db.ClaimOwner(ctx, "556411112222"); err != nil || owner != "556411112222" {
+		t.Fatalf("first claim = %q, %v", owner, err)
+	}
+	if owner, err := db.ClaimOwner(ctx, "5511988887777"); err != nil || owner != "556411112222" {
+		t.Fatalf("second claim = %q, %v; want the first number kept", owner, err)
+	}
+}
+
 func TestMarkSentWithoutTheArchive(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()

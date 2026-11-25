@@ -98,6 +98,7 @@ type Status struct {
 	Outgoing          Outgoing     `json:"send"`
 	// Until when WhatsApp refuses messages to new contacts; null without a lock.
 	ReachoutLockedUntil *string `json:"reachout_locked_until"`
+	AccountChanged      bool    `json:"account_changed"`
 }
 
 type Outgoing struct {
@@ -223,6 +224,9 @@ func (s *Service) start() (err error) {
 		in.wg.Go(func() { s.connect(in.ctx, g, cli) })
 	}
 	s.mu.Unlock()
+	if device.ID != nil {
+		s.recordOwner(in, cli)
+	}
 	in.wg.Go(func() { in.media.run(in.ctx) })
 	in.wg.Go(func() { s.expireLoop(in) })
 	return nil
@@ -396,6 +400,7 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	switch e := raw.(type) {
 	case *events.Connected:
 		s.opt.Log.Info("conectado ao WhatsApp")
+		s.recordOwner(in, cli)
 	case *events.Disconnected:
 		s.opt.Log.Warn("conexão com o WhatsApp caiu")
 	case *events.StreamReplaced:
@@ -590,6 +595,17 @@ func maskPhone(user string) string {
 	return "+" + user[:4] + "••••" + user[len(user)-4:]
 }
 
+// recordOwner makes the first paired number the archive's owner; another number later gets account_changed.
+func (s *Service) recordOwner(in *instance, cli Client) {
+	owner, paired, err := s.claimOwner(in.ctx, in, cli)
+	switch {
+	case err != nil:
+		s.opt.Log.Error("gravar o dono do arquivo", "erro", err)
+	case owner != paired:
+		s.opt.Log.Warn("o WhatsApp pareado é outro número, não o dono do arquivo; envio recusado até o wipe")
+	}
+}
+
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	return with(s, func(in *instance) (Status, error) {
 		sum, err := in.db.Totals(ctx)
@@ -601,6 +617,10 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 			return Status{}, err
 		}
 		locked, err := s.reachoutLocked(ctx, in)
+		if err != nil {
+			return Status{}, err
+		}
+		owner, err := in.db.Owner(ctx)
 		if err != nil {
 			return Status{}, err
 		}
@@ -618,6 +638,7 @@ func (s *Service) Status(ctx context.Context) (Status, error) {
 			if id := s.cli.Device().ID; id != nil {
 				st.Device = optional(maskPhone(id.User))
 				st.DeviceName = optional(deviceName)
+				st.AccountChanged = owner != "" && owner != id.User
 			}
 		}
 		st.QR, st.QRExpiresAt = optional(s.qr), optionalTime(s.qrExp)

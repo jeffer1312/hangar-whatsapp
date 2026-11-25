@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/jeffer1312/hangar-whatsapp/internal/store"
 	"github.com/jeffer1312/hangar-whatsapp/internal/wa/watest"
 )
 
@@ -202,5 +204,26 @@ func TestOutboxAnswer(t *testing.T) {
 	}
 	if v, ok := st["reachout_locked_until"]; !ok || v != nil {
 		t.Fatalf("status reachout_locked_until = %v (present %v); want null", v, ok)
+	}
+}
+
+func TestOutboxRefusesAnotherNumber(t *testing.T) {
+	dir := t.TempDir()
+	db, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ClaimOwner(context.Background(), "5511988887777"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	e := newEnvIn(t, true, func() time.Time { return now }, dir)
+	e.seed(1)
+	r := e.do("POST", "/v1/outbox", `{"chat":"556499990000","text":"oi","origin":"notebook::s1"}`)
+	if r.status != 409 || r.code(t) != "account_changed" {
+		t.Fatalf("create with another number = %d %s", r.status, r.body)
+	}
+	if st := e.do("GET", "/v1/status", "").json(t); st["account_changed"] != true {
+		t.Fatalf("status account_changed = %v", st["account_changed"])
 	}
 }

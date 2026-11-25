@@ -39,6 +39,7 @@ var (
 	ErrFileTooLarge    = errors.New("anexo acima de 100 MB")
 	ErrUnsupportedChat = errors.New("sem envio para lista de transmissão nem canal")
 	ErrReachoutLocked  = errors.New("o WhatsApp travou o envio a contatos novos")
+	ErrAccountChanged  = errors.New("o WhatsApp pareado é outro número, não o dono do arquivo")
 )
 
 // DraftRequest is what a session asks to send; Origin and OriginCwd are declared by the Hangar.
@@ -92,6 +93,9 @@ func (s *Service) createDraft(ctx context.Context, in *instance, req DraftReques
 	}
 	cli, err := s.pairedClient()
 	if err != nil {
+		return store.Draft{}, false, err
+	}
+	if err := s.checkOwner(ctx, in, cli); err != nil {
 		return store.Draft{}, false, err
 	}
 	if err := s.expire(ctx, in); err != nil {
@@ -275,6 +279,26 @@ func (s *Service) reachoutLocked(ctx context.Context, in *instance) (string, err
 	return until, nil
 }
 
+// claimOwner records the paired number as the archive's owner when there is none yet, and returns it.
+func (s *Service) claimOwner(ctx context.Context, in *instance, cli Client) (owner, paired string, err error) {
+	id := cli.Device().ID
+	if id == nil {
+		return "", "", ErrNotPaired
+	}
+	owner, err = in.db.ClaimOwner(ctx, id.User)
+	return owner, id.User, err
+}
+
+// checkOwner refuses to send from an archive another number built: "this person wrote to you" would be
+// about someone else's account.
+func (s *Service) checkOwner(ctx context.Context, in *instance, cli Client) error {
+	owner, paired, err := s.claimOwner(ctx, in, cli)
+	if err == nil && owner != paired {
+		err = ErrAccountChanged
+	}
+	return err
+}
+
 func (s *Service) checkReachout(ctx context.Context, in *instance) error {
 	until, err := s.reachoutLocked(ctx, in)
 	if err == nil && until != "" {
@@ -303,6 +327,9 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		}
 		cli, err := s.pairedClient()
 		if err != nil {
+			return store.Draft{}, err
+		}
+		if err := s.checkOwner(ctx, in, cli); err != nil {
 			return store.Draft{}, err
 		}
 		if err := s.checkReachout(ctx, in); err != nil {
