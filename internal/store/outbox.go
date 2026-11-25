@@ -354,6 +354,14 @@ func (d *DB) FinishSent(ctx context.Context, id string, r Record, media string) 
 	return tx.Commit()
 }
 
+// MarkSent records a send that went out when FinishSent could not also archive it: the draft must
+// not look failed, or the owner may approve it again.
+func (d *DB) MarkSent(ctx context.Context, id, messageID string) error {
+	_, err := d.w.ExecContext(ctx, `UPDATE outbox SET state = 'sent', message_id = ? WHERE id = ? AND state = 'sending'`,
+		messageID, id)
+	return err
+}
+
 // FinishFailed closes a send that did not go out; waCode 0 means WhatsApp gave no code.
 func (d *DB) FinishFailed(ctx context.Context, id, reason string, waCode int) error {
 	_, err := d.w.ExecContext(ctx, `UPDATE outbox SET state = 'failed', error = ?, wa_code = nullif(?, 0)

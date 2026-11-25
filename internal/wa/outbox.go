@@ -112,7 +112,7 @@ func (s *Service) createDraft(ctx context.Context, in *instance, req DraftReques
 		if jid.Server != types.DefaultUserServer {
 			d.ChatNumber = jid.String()
 		}
-		d.ChatName, d.ChatNameSource = contactName(ctx, cli.Device(), jid, info.Name)
+		d.ChatName, d.ChatNameSource = s.contactName(ctx, cli.Device(), jid, info.Name)
 	}
 	if req.ReplyTo != "" {
 		text, raw, err := in.db.Quoted(ctx, d.Chat, req.ReplyTo)
@@ -138,7 +138,7 @@ func (s *Service) createDraft(ctx context.Context, in *instance, req DraftReques
 
 // contactName prefers the phone's address book ("contact") to the name people give themselves
 // ("push"); the archive's name has no known origin.
-func contactName(ctx context.Context, dev *wastore.Device, jid types.JID, archived string) (string, string) {
+func (s *Service) contactName(ctx context.Context, dev *wastore.Device, jid types.JID, archived string) (string, string) {
 	if dev.Contacts == nil {
 		return archived, ""
 	}
@@ -151,13 +151,19 @@ func contactName(ctx context.Context, dev *wastore.Device, jid types.JID, archiv
 		} else {
 			other, err = dev.LIDs.GetPNForLID(ctx, jid)
 		}
-		if err == nil && !other.IsEmpty() {
+		if err != nil {
+			s.opt.Log.Warn("ligar número e LID do contato", "conversa", jid.String(), "erro", err)
+		} else if !other.IsEmpty() {
 			jids = append(jids, other)
 		}
 	}
 	for _, j := range jids {
 		c, err := dev.Contacts.GetContact(ctx, j)
-		if err != nil || !c.Found {
+		if err != nil {
+			s.opt.Log.Warn("ler contato na agenda do aparelho", "contato", j.String(), "erro", err)
+			continue
+		}
+		if !c.Found {
 			continue
 		}
 		if name := cmp.Or(c.FullName, c.FirstName); name != "" {
@@ -190,6 +196,10 @@ func (s *Service) sweep(ctx context.Context, in *instance, startup bool) {
 	}
 	for _, e := range entries {
 		d, err := in.db.Draft(ctx, e.Name())
+		if err != nil && !errors.Is(err, store.ErrDraftNotFound) {
+			s.opt.Log.Error("ler rascunho da cópia do anexo", "rascunho", e.Name(), "erro", err)
+			continue
+		}
 		final := err == nil && d.State != store.OutboxPending && d.State != store.OutboxSending
 		if final || (startup && errors.Is(err, store.ErrDraftNotFound)) {
 			if err := os.RemoveAll(s.copyDir(e.Name())); err != nil {
@@ -391,7 +401,11 @@ func (s *Service) deliver(in *instance, cli Client, d store.Draft) {
 	s.opt.Log.Info("mensagem enviada", "rascunho", d.ID, "origem", d.Origin)
 	rec, media := s.archived(cli, d, to, msg, resp, copyDir)
 	if err := in.db.FinishSent(done, d.ID, rec, media); err != nil {
-		s.opt.Log.Error("gravar envio feito", "rascunho", d.ID, "erro", err)
+		s.opt.Log.Error("arquivar envio feito; o rascunho fica só como enviado", "rascunho", d.ID, "mensagem", resp.ID, "erro", err)
+		if err := in.db.MarkSent(done, d.ID, resp.ID); err != nil {
+			s.opt.Log.Error("gravar envio feito; a mensagem saiu, mas o rascunho vai aparecer como interrompido",
+				"rascunho", d.ID, "mensagem", resp.ID, "erro", err)
+		}
 	}
 }
 
@@ -406,7 +420,7 @@ func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d stor
 	if err := cli.SendChatPresence(ctx, to, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
 		return nil, resp, fmt.Errorf("parar de mostrar digitando: %w", err)
 	}
-	quote := quoteContext(cli, d)
+	quote := s.quoteContext(cli, d)
 	var msg *waE2E.Message
 	switch {
 	case d.File != nil:
@@ -475,13 +489,14 @@ func upload(ctx context.Context, cli Client, dir, name string) (*waE2E.DocumentM
 }
 
 // quoteContext cites the replied message as WhatsApp clients do: its id, its author and its content.
-func quoteContext(cli Client, d store.Draft) *waE2E.ContextInfo {
+func (s *Service) quoteContext(cli Client, d store.Draft) *waE2E.ContextInfo {
 	if d.ReplyTo == nil {
 		return nil
 	}
 	ctx := &waE2E.ContextInfo{StanzaID: proto.String(*d.ReplyTo)}
 	var o original
-	if json.Unmarshal([]byte(d.QuotedRaw), &o) != nil {
+	if err := json.Unmarshal([]byte(d.QuotedRaw), &o); err != nil {
+		s.opt.Log.Warn("mensagem citada sem original legível; a citação vai só com o id", "rascunho", d.ID, "erro", err)
 		return ctx
 	}
 	author, err := types.ParseJID(o.Sender)
@@ -496,8 +511,13 @@ func quoteContext(cli Client, d store.Draft) *waE2E.ContextInfo {
 	if !author.IsEmpty() {
 		ctx.Participant = proto.String(author.ToNonAD().String())
 	}
+	if ctx.Participant == nil {
+		s.opt.Log.Warn("autor da mensagem citada desconhecido", "rascunho", d.ID)
+	}
 	var quoted waE2E.Message
-	if protojson.Unmarshal(o.Message, &quoted) == nil {
+	if err := protojson.Unmarshal(o.Message, &quoted); err != nil {
+		s.opt.Log.Warn("conteúdo da mensagem citada ilegível; a citação vai sem ele", "rascunho", d.ID, "erro", err)
+	} else {
 		ctx.QuotedMessage = &quoted
 	}
 	return ctx
@@ -527,6 +547,7 @@ func (s *Service) archived(cli Client, d store.Draft, to types.JID, msg *waE2E.M
 	rel := store.MediaRel(d.Chat, resp.ID, c.ext)
 	dest, ok := store.MediaAbs(s.opt.Dir, rel)
 	if !ok {
+		s.opt.Log.Warn("caminho do anexo enviado fora de media/; ele será baixado de volta", "rascunho", d.ID, "caminho", rel)
 		return rec, ""
 	}
 	err = os.MkdirAll(filepath.Dir(dest), 0o700)

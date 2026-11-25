@@ -301,3 +301,21 @@ func TestReachoutLock(t *testing.T) {
 		t.Fatalf("cleared lock = %q", until)
 	}
 }
+
+func TestMarkSentWithoutTheArchive(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	create(t, db, draft("K1", "srv::s1", "oi"), t0)
+	if _, err := db.ClaimSend(ctx, "K1", "desktop", t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkSent(ctx, "K1", "WAID9"); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := db.Draft(ctx, "K1"); d.State != "sent" || d.MessageID == nil || *d.MessageID != "WAID9" {
+		t.Fatalf("after MarkSent = %+v", d)
+	}
+	if n, _ := db.InterruptSending(ctx); n != 0 {
+		t.Fatalf("a sent draft was interrupted on restart")
+	}
+}
