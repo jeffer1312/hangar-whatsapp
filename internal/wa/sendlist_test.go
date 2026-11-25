@@ -26,6 +26,9 @@ const draftSender = "internal/wa/outbox.go"
 
 var draftFiles = map[string]bool{draftSender: true, "internal/wa/client.go": true, "internal/wa/watest/fake.go": true}
 
+// Types the interface and the stand-in name; the methods appear there only where they are declared.
+var draftTypes = map[string]bool{"SendResponse": true, "SendRequestExtra": true}
+
 var uploads = map[string]bool{"Upload": true, "UploadReader": true, "UploadNewsletter": true, "UploadNewsletterReader": true}
 
 // Calls that would show the user as active or tell the sender the message was read, in any file.
@@ -49,14 +52,16 @@ func outgoing(root string) (map[string][]string, error) {
 		}
 		rel, _ := filepath.Rel(root, path)
 		rel = filepath.ToSlash(rel)
-		calls := map[*ast.Ident]bool{}
+		declared := map[*ast.Ident]bool{}
 		ast.Inspect(file, func(n ast.Node) bool {
-			if c, ok := n.(*ast.CallExpr); ok {
-				switch f := c.Fun.(type) {
-				case *ast.SelectorExpr:
-					calls[f.Sel] = true
-				case *ast.Ident:
-					calls[f] = true
+			switch d := n.(type) {
+			case *ast.FuncDecl:
+				declared[d.Name] = true
+			case *ast.InterfaceType:
+				for _, m := range d.Methods.List {
+					for _, id := range m.Names {
+						declared[id] = true
+					}
 				}
 			}
 			return true
@@ -69,7 +74,7 @@ func outgoing(root string) (map[string][]string, error) {
 			name := id.Name
 			// Send, SendMessage, SendPresence…, but not Sender.
 			send := strings.HasPrefix(name, "Send") && (len(name) == 4 || unicode.IsUpper(rune(name[4])))
-			allowed := allowedEverywhere[name] || (draftNames[name] && (rel == draftSender || draftFiles[rel] && !calls[id]))
+			allowed := allowedEverywhere[name] || (draftNames[name] && (rel == draftSender || draftFiles[rel] && (draftTypes[name] || declared[id])))
 			if forbidden[name] || ((send || uploads[name]) && !allowed) {
 				found[name] = append(found[name], rel)
 			}
@@ -110,13 +115,13 @@ func TestClosedListCatchesStrayCalls(t *testing.T) {
 	put("internal/wa/media.go", "c.SendMediaRetryReceipt(); c.SendMessage()")
 	put("internal/api/api.go", "c.Upload(); c.SubscribePresence(); c.SendChatPresence()")
 	// The interface may declare the method; only outbox.go may call it.
-	put("internal/wa/client.go", "c.Client.SendMessage()\n}\n\ntype C interface {\n\tSendMessage() SendResponse")
+	put("internal/wa/client.go", "(c.Client.SendMessage)(); up := c.UploadReader; up()\n}\n\ntype C interface {\n\tSendMessage() SendResponse\n\tUploadReader()")
 	found, err := outgoing(root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	want := map[string][]string{"MarkRead": {"internal/wa/outbox.go"}, "SendPresence": {"internal/wa/outbox.go"},
-		"SendMessage": {"internal/wa/client.go", "internal/wa/media.go"}, "Upload": {"internal/api/api.go"}, "SubscribePresence": {"internal/api/api.go"},
+		"SendMessage": {"internal/wa/client.go", "internal/wa/media.go"}, "UploadReader": {"internal/wa/client.go"}, "Upload": {"internal/api/api.go"}, "SubscribePresence": {"internal/api/api.go"},
 		"SendChatPresence": {"internal/api/api.go"}}
 	if fmt.Sprint(found) != fmt.Sprint(want) {
 		t.Fatalf("found = %v\nwant  %v", found, want)

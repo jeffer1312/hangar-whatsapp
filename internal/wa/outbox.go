@@ -452,18 +452,21 @@ func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d stor
 	}
 	resp, err := cli.SendMessage(ctx, to, msg)
 	if err != nil && !errors.Is(err, whatsmeow.ErrServerReturnedError) &&
-		(errors.Is(err, whatsmeow.ErrMessageTimedOut) || ctx.Err() != nil || lostAck(err)) {
+		(errors.Is(err, whatsmeow.ErrMessageTimedOut) || ctx.Err() != nil || lostAck(resp, err)) {
 		err = fmt.Errorf("%w: %w", errUnconfirmed, err)
 	}
 	return msg, resp, err
 }
 
-// lostAck is the connection dropping after the message frame was written, while waiting for the
-// server's answer: other requests fail with the same type, so the action tells them apart. A bare
-// ErrNotConnected only comes from the resend after a reconnect; before the frame it comes wrapped.
-func lostAck(err error) bool {
+// lostAck is the connection dropping after the message frame was written. whatsmeow times the wait
+// for the server's answer only once the frame went, so any error after it (the resend's own socket
+// error included) comes from that stage. The error checks hold without the timing: other requests
+// fail with the same type, so the action tells them apart, and a bare ErrNotConnected only comes from
+// the resend after a reconnect.
+func lostAck(resp whatsmeow.SendResponse, err error) bool {
 	var d *whatsmeow.DisconnectedError
-	return errors.As(err, &d) && strings.HasPrefix(d.Action, "message send") || err == whatsmeow.ErrNotConnected
+	return resp.DebugTimings.Resp > 0 || errors.As(err, &d) && strings.HasPrefix(d.Action, "message send") ||
+		err == whatsmeow.ErrNotConnected
 }
 
 // holdReachout locks sends until the given time unless a later lock is already recorded: a 463 or 475

@@ -752,6 +752,14 @@ func TestDisconnectWaitingForTheAckIsUnconfirmed(t *testing.T) {
 			t.Fatalf("%v: disconnect after the frame went = %+v, want error unconfirmed", err, d)
 		}
 	}
+	// The resend after a reconnect can fail with the socket's own error, unwrapped like errors before the frame.
+	h.clock.Add(time.Minute)
+	h.client().FailSendAfterFrame(errors.New("frame socket is closed"))
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "resend failed"})
+	h.approve(d.ID)
+	if d = h.waitState(d.ID, "failed"); d.Error == nil || *d.Error != "unconfirmed" {
+		t.Fatalf("resend failure after the frame = %+v, want error unconfirmed", d)
+	}
 	// Before the frame, the same errors come wrapped or from another request: the message did not go.
 	for _, err := range []error{fmt.Errorf("failed to send message node: %w", whatsmeow.ErrNotConnected),
 		fmt.Errorf("failed to get device list: %w", whatsmeow.ErrIQDisconnected)} {

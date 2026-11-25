@@ -140,6 +140,10 @@ type Service struct {
 	// After a quiet stretch of 2×reactivateMaxWait it starts over.
 	reactivateBase, reactivateWait time.Duration
 	reactivatedAt                  time.Time
+
+	// reachout orders a client's lock notice (generation check and write) with Pair replacing the
+	// client, without holding mu during the database write.
+	reachout sync.Mutex
 }
 
 func Open(ctx context.Context, opt Options) (*Service, error) {
@@ -413,9 +417,11 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	case *events.NotifyAccountReachoutTimelock:
 		// A client Pair replaced cannot set or lift the new one's lock. The write stays outside mu: the
 		// archiver may hold the database for seconds.
+		s.reachout.Lock()
 		if s.current(g) {
 			s.lockReachout(in, e)
 		}
+		s.reachout.Unlock()
 	case *events.Message:
 		if media, _ := in.archive.message(cli, e, types.EmptyJID); media {
 			in.media.wake()
@@ -432,6 +438,8 @@ func (s *Service) Pair(phone string) error {
 		return ErrBadPhone
 	}
 	_, err := with(s, func(in *instance) (struct{}, error) {
+		s.reachout.Lock()
+		defer s.reachout.Unlock()
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch s.state {

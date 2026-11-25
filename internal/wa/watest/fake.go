@@ -36,6 +36,7 @@ type Client struct {
 	// Set before the event that triggers them: what DownloadToFile and SendMediaRetryReceipt return.
 	downloadErr, retryErr, logoutErr error
 	sendErr                          error
+	sendAnswered                     bool
 	sent                             []Sent
 	presences                        []string
 	uploads                          [][]byte
@@ -50,7 +51,15 @@ type Sent struct {
 func (f *Client) FailSend(err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.sendErr = err
+	f.sendErr, f.sendAnswered = err, false
+}
+
+// FailSendAfterFrame fails like whatsmeow does once the frame went and the server's answer was a
+// disconnect: the response carries the time it waited for that answer.
+func (f *Client) FailSendAfterFrame(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sendErr, f.sendAnswered = err, true
 }
 
 func (f *Client) SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error {
@@ -78,7 +87,11 @@ func (f *Client) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Messa
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, Sent{To: to, Message: msg})
 	if f.sendErr != nil {
-		return whatsmeow.SendResponse{}, f.sendErr
+		var resp whatsmeow.SendResponse
+		if f.sendAnswered {
+			resp.DebugTimings.Resp = time.Millisecond
+		}
+		return resp, f.sendErr
 	}
 	return whatsmeow.SendResponse{ID: fmt.Sprintf("3EB0SENT%d", len(f.sent)), Timestamp: time.Date(2026, 11, 24, 12, 0, 5, 0, time.UTC)}, nil
 }
