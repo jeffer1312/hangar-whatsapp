@@ -157,6 +157,7 @@ func (s *Service) contactName(ctx context.Context, dev *wastore.Device, jid type
 			jids = append(jids, other)
 		}
 	}
+	push := ""
 	for _, j := range jids {
 		c, err := dev.Contacts.GetContact(ctx, j)
 		if err != nil {
@@ -169,9 +170,10 @@ func (s *Service) contactName(ctx context.Context, dev *wastore.Device, jid type
 		if name := cmp.Or(c.FullName, c.FirstName); name != "" {
 			return name, "contact"
 		}
-		if name := cmp.Or(c.PushName, c.BusinessName); name != "" {
-			return name, "push"
-		}
+		push = cmp.Or(push, c.PushName, c.BusinessName)
+	}
+	if push != "" {
+		return push, "push"
 	}
 	return archived, ""
 }
@@ -402,6 +404,12 @@ func (s *Service) deliver(in *instance, cli Client, d store.Draft) {
 	rec, media := s.archived(cli, d, to, msg, resp, copyDir)
 	if err := in.db.FinishSent(done, d.ID, rec, media); err != nil {
 		s.opt.Log.Error("arquivar envio feito; o rascunho fica só como enviado", "rascunho", d.ID, "mensagem", resp.ID, "erro", err)
+		// No message points at the moved copy: it would stay in media/ for good.
+		if p, ok := store.MediaAbs(s.opt.Dir, media); media != "" && ok {
+			if err := os.Remove(p); err != nil {
+				s.opt.Log.Error("apagar anexo enviado que ficou sem mensagem no arquivo", "caminho", p, "erro", err)
+			}
+		}
 		if err := in.db.MarkSent(done, d.ID, resp.ID); err != nil {
 			s.opt.Log.Error("gravar envio feito; a mensagem saiu, mas o rascunho vai aparecer como interrompido",
 				"rascunho", d.ID, "mensagem", resp.ID, "erro", err)
@@ -443,21 +451,24 @@ func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d stor
 		return nil, resp, err
 	}
 	resp, err := cli.SendMessage(ctx, to, msg)
-	if err != nil && !errors.Is(err, whatsmeow.ErrServerReturnedError) && (errors.Is(err, whatsmeow.ErrMessageTimedOut) || ctx.Err() != nil) {
+	if err != nil && !errors.Is(err, whatsmeow.ErrServerReturnedError) &&
+		(errors.Is(err, whatsmeow.ErrMessageTimedOut) || ctx.Err() != nil || lostAck(err)) {
 		err = fmt.Errorf("%w: %w", errUnconfirmed, err)
 	}
 	return msg, resp, err
 }
 
+// lostAck is the connection dropping after the message frame was written, while waiting for the
+// server's answer: other requests fail with the same type, so the action tells them apart.
+func lostAck(err error) bool {
+	var d *whatsmeow.DisconnectedError
+	return errors.As(err, &d) && strings.HasPrefix(d.Action, "message send")
+}
+
 // holdReachout locks sends until the given time unless a later lock is already recorded: a 463 or 475
 // comes without an end, and the next approval must not insist.
 func (s *Service) holdReachout(ctx context.Context, in *instance, until time.Time) {
-	next := until.UTC().Format(store.TimeLayout)
-	current, err := in.db.ReachoutLock(ctx)
-	if err == nil && current < next {
-		err = in.db.SetReachoutLock(ctx, next)
-	}
-	if err != nil {
+	if err := in.db.ExtendReachoutLock(ctx, until.UTC().Format(store.TimeLayout)); err != nil {
 		s.opt.Log.Error("gravar trava depois da recusa do WhatsApp", "erro", err)
 	}
 }
@@ -576,7 +587,13 @@ func (s *Service) lockReachout(in *instance, e *events.NotifyAccountReachoutTime
 	} else {
 		s.opt.Log.Info("o WhatsApp tirou a trava de mensagens a contatos novos")
 	}
-	if err := in.db.SetReachoutLock(in.ctx, until); err != nil {
+	var err error
+	if until == "" {
+		err = in.db.SetReachoutLock(in.ctx, "")
+	} else {
+		err = in.db.ExtendReachoutLock(in.ctx, until)
+	}
+	if err != nil {
 		s.opt.Log.Error("gravar trava do WhatsApp", "erro", err)
 	}
 }

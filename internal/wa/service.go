@@ -3,6 +3,7 @@ package wa
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -201,6 +202,11 @@ func (s *Service) start() (err error) {
 	}
 	in := &instance{db: db, container: container}
 	in.ctx, in.cancel = context.WithCancel(s.root)
+	// Before any worker starts: a draft left sending would otherwise stay so with nobody to finish it.
+	if err := s.recoverOutbox(in); err != nil {
+		in.cancel()
+		return fmt.Errorf("recuperar rascunhos: %w", err)
+	}
 	in.archive = &archiver{ctx: in.ctx, db: db, log: s.opt.Log}
 	in.media = newMedia(db, s.opt.Dir, s.opt.Log, s.now, s.connectedClient)
 	s.in = in
@@ -213,9 +219,6 @@ func (s *Service) start() (err error) {
 		in.wg.Go(func() { s.connect(in.ctx, g, cli) })
 	}
 	s.mu.Unlock()
-	if err := s.recoverOutbox(in); err != nil {
-		s.opt.Log.Error("recuperar rascunhos", "erro", err)
-	}
 	in.wg.Go(func() { in.media.run(in.ctx) })
 	in.wg.Go(func() { s.expireLoop(in) })
 	return nil
@@ -408,7 +411,8 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	case *events.MediaRetry:
 		in.media.reply(e)
 	case *events.NotifyAccountReachoutTimelock:
-		s.lockReachout(in, e)
+		// Under mu with the generation, so a client Pair replaced cannot set or lift the new one's lock.
+		s.update(g, func() { s.lockReachout(in, e) })
 	case *events.Message:
 		if media, _ := in.archive.message(cli, e, types.EmptyJID); media {
 			in.media.wake()

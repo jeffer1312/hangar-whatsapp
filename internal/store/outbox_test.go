@@ -302,6 +302,27 @@ func TestReachoutLock(t *testing.T) {
 	}
 }
 
+func TestReachoutLockOnlyGrows(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	if err := db.ExtendReachoutLock(ctx, "2026-11-25T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if until, _ := db.ReachoutLock(ctx); until != "2026-11-25T12:00:00Z" {
+		t.Fatalf("first lock = %q", until)
+	}
+	// A 48 h lock from WhatsApp is not cut short by the 24 h hold after a 463.
+	if err := db.ExtendReachoutLock(ctx, "2026-11-26T12:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ExtendReachoutLock(ctx, "2026-11-25T18:00:00Z"); err != nil {
+		t.Fatal(err)
+	}
+	if until, _ := db.ReachoutLock(ctx); until != "2026-11-26T12:00:00Z" {
+		t.Fatalf("lock after a shorter hold = %q, want the later end", until)
+	}
+}
+
 func TestMarkSentWithoutTheArchive(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()

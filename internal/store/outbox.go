@@ -453,6 +453,13 @@ func (d *DB) ReachoutLock(ctx context.Context) (string, error) {
 	return until, err
 }
 
+// ExtendReachoutLock records a lock end unless a later one is already recorded.
+func (d *DB) ExtendReachoutLock(ctx context.Context, until string) error {
+	_, err := d.w.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE excluded.value > settings.value`, reachoutKey, until)
+	return err
+}
+
 func (d *DB) SetReachoutLock(ctx context.Context, until string) error {
 	if until == "" {
 		_, err := d.w.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, reachoutKey)

@@ -3,9 +3,11 @@ package wa
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -248,8 +250,10 @@ func TestDraftAttachment(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(copyDir, "entrega.zip")); err != nil || string(b) != "PK-conteúdo" {
 		t.Fatalf("copy = %q, %v", b, err)
 	}
-	if st, err := os.Stat(copyDir); err != nil || st.Mode().Perm() != 0o700 {
-		t.Fatalf("copy folder = %v, %v; want 0700", st, err)
+	if st, err := os.Stat(copyDir); err != nil || !st.IsDir() {
+		t.Fatalf("copy folder = %v, %v", st, err)
+	} else if runtime.GOOS != "windows" && st.Mode().Perm() != 0o700 {
+		t.Fatalf("copy folder mode = %v, want 0700", st.Mode().Perm())
 	}
 	// Changing the original after the draft does not change what goes out.
 	writeFile(t, zip, "trocado")
@@ -332,6 +336,7 @@ func TestDraftAttachmentRefusals(t *testing.T) {
 func TestHangarWorktreesCanAttach(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	h := newOutboxHarness(t, true)
 	h.receive("M1", "olá")
 	tree := filepath.Join(home, ".hangar", "worktrees", "hangar", "feat-x")
@@ -362,9 +367,6 @@ func TestCopyOfADraftExpiredByAnotherAnswerIsDeleted(t *testing.T) {
 	h.clock.Add(2 * time.Minute)
 	// The decline's own transaction expires a; nothing else expires afterwards.
 	if _, err := h.svc.DeclineDraft(context.Background(), b.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.svc.Drafts(context.Background(), "pending"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(h.dir, "outbox", a.ID)); !os.IsNotExist(err) {
@@ -610,9 +612,11 @@ func TestApprovedFileGoesAsOneDocument(t *testing.T) {
 		doc.GetDirectPath() != "/v/t62/d1" || doc.GetFileLength() != 6 || len(doc.GetMediaKey()) != 32 {
 		t.Fatalf("document = %v", sent[0].Message)
 	}
-	if _, err := os.Stat(filepath.Join(h.dir, "outbox", d.ID)); !os.IsNotExist(err) {
-		t.Fatalf("copy still in outbox/: %v", err)
-	}
+	// The copy goes after the sent state is written: wait on the folder itself, not on a service read that sweeps it.
+	watest.WaitFor(t, "the copy to leave outbox/", func() bool {
+		_, err := os.Stat(filepath.Join(h.dir, "outbox", d.ID))
+		return os.IsNotExist(err)
+	})
 	page, _ := h.svc.Messages(context.Background(), store.MessagesQuery{Chat: chatA, Limit: 10})
 	m := page.Messages[1]
 	if m.Kind != "document" || m.Text != "segue o zip" || m.MediaPath == nil {
@@ -707,4 +711,90 @@ func TestReachoutTimelockStopsSends(t *testing.T) {
 	watest.WaitFor(t, "the lock to lift", func() bool { return h.status().ReachoutLockedUntil == nil })
 	h.approve(d.ID)
 	h.waitState(d.ID, "sent")
+}
+
+func TestAddressBookNameOfTheLinkedIdentityWins(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	ctx := context.Background()
+	dev := h.client().Device()
+	dev.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{}, AccountSignature: make([]byte, 64),
+		AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
+	if err := dev.Save(ctx); err != nil {
+		t.Fatal(err)
+	}
+	pn := types.NewJID("556499990000", types.DefaultUserServer)
+	lid := types.NewJID("123456789012345", types.HiddenUserServer)
+	if err := dev.LIDs.PutLIDMapping(ctx, lid, pn); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := dev.Contacts.PutPushName(ctx, pn, "Mari ✨"); err != nil {
+		t.Fatal(err)
+	}
+	if err := dev.Contacts.PutContactName(ctx, lid, "Maria", "Maria Souza"); err != nil {
+		t.Fatal(err)
+	}
+	if d := h.mustDraft(DraftRequest{Chat: chatA, Text: "oi"}); d.ChatName != "Maria Souza" || d.ChatNameSource != "contact" {
+		t.Fatalf("name = %q source %q; want the address book of the LID over the push name of the number", d.ChatName, d.ChatNameSource)
+	}
+}
+
+func TestDisconnectWaitingForTheAckIsUnconfirmed(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	for _, action := range []string{"message send", "message send (retry)"} {
+		h.client().FailSend(&whatsmeow.DisconnectedError{Action: action})
+		d := h.mustDraft(DraftRequest{Chat: chatA, Text: action})
+		h.approve(d.ID)
+		if d = h.waitState(d.ID, "failed"); d.Error == nil || *d.Error != "unconfirmed" {
+			t.Fatalf("%s: disconnect after the frame went = %+v, want error unconfirmed", action, d)
+		}
+	}
+}
+
+func TestSentFileThatCannotBeArchivedLeavesNoCopy(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "manda o arquivo")
+	db, err := sql.Open("sqlite", "file:"+store.MessagesPath(h.dir)+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TRIGGER no_sent BEFORE INSERT ON messages WHEN NEW.from_me = 1
+		BEGIN SELECT RAISE(ABORT, 'archive refused'); END`); err != nil {
+		t.Fatal(err)
+	}
+	zip := writeFile(t, filepath.Join(t.TempDir(), "entrega.zip"), "PK-zip")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "segue", File: zip})
+	h.approve(d.ID)
+	if d = h.waitState(d.ID, "sent"); d.MessageID == nil {
+		t.Fatalf("sent without archive = %+v", d)
+	}
+	watest.WaitFor(t, "the copy to leave outbox/", func() bool {
+		_, err := os.Stat(filepath.Join(h.dir, "outbox", d.ID))
+		return os.IsNotExist(err)
+	})
+	var left []string
+	filepath.WalkDir(filepath.Join(h.dir, "media"), func(p string, e fs.DirEntry, err error) error {
+		if err == nil && !e.IsDir() {
+			left = append(left, p)
+		}
+		return nil
+	})
+	if len(left) != 0 {
+		t.Fatalf("plain copies left in media/ with no message pointing at them: %v", left)
+	}
+}
+
+func TestReplacedClientCannotTouchTheReachoutLock(t *testing.T) {
+	h := newOutboxHarness(t, false)
+	old := h.client()
+	if err := h.svc.Pair(""); err != nil {
+		t.Fatal(err)
+	}
+	old.Emit(&events.NotifyAccountReachoutTimelock{IsActive: true,
+		TimeEnforcementEnds: jsontime.UnixString{Time: h.clock.Now().Add(48 * time.Hour)}})
+	if u := h.status().ReachoutLockedUntil; u != nil {
+		t.Fatalf("a replaced client's notice set the lock to %s", *u)
+	}
 }
