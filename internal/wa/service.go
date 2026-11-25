@@ -411,8 +411,11 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	case *events.MediaRetry:
 		in.media.reply(e)
 	case *events.NotifyAccountReachoutTimelock:
-		// Under mu with the generation, so a client Pair replaced cannot set or lift the new one's lock.
-		s.update(g, func() { s.lockReachout(in, e) })
+		// A client Pair replaced cannot set or lift the new one's lock. The write stays outside mu: the
+		// archiver may hold the database for seconds.
+		if s.current(g) {
+			s.lockReachout(in, e)
+		}
 	case *events.Message:
 		if media, _ := in.archive.message(cli, e, types.EmptyJID); media {
 			in.media.wake()

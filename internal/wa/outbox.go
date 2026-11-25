@@ -459,10 +459,11 @@ func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d stor
 }
 
 // lostAck is the connection dropping after the message frame was written, while waiting for the
-// server's answer: other requests fail with the same type, so the action tells them apart.
+// server's answer: other requests fail with the same type, so the action tells them apart. A bare
+// ErrNotConnected only comes from the resend after a reconnect; before the frame it comes wrapped.
 func lostAck(err error) bool {
 	var d *whatsmeow.DisconnectedError
-	return errors.As(err, &d) && strings.HasPrefix(d.Action, "message send")
+	return errors.As(err, &d) && strings.HasPrefix(d.Action, "message send") || err == whatsmeow.ErrNotConnected
 }
 
 // holdReachout locks sends until the given time unless a later lock is already recorded: a 463 or 475

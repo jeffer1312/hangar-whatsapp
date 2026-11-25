@@ -742,12 +742,25 @@ func TestAddressBookNameOfTheLinkedIdentityWins(t *testing.T) {
 func TestDisconnectWaitingForTheAckIsUnconfirmed(t *testing.T) {
 	h := newOutboxHarness(t, true)
 	h.receive("M1", "olá")
-	for _, action := range []string{"message send", "message send (retry)"} {
-		h.client().FailSend(&whatsmeow.DisconnectedError{Action: action})
-		d := h.mustDraft(DraftRequest{Chat: chatA, Text: action})
+	for _, err := range []error{&whatsmeow.DisconnectedError{Action: "message send"},
+		&whatsmeow.DisconnectedError{Action: "message send (retry)"}, whatsmeow.ErrNotConnected} {
+		h.clock.Add(time.Minute) // past the per-minute cap
+		h.client().FailSend(err)
+		d := h.mustDraft(DraftRequest{Chat: chatA, Text: err.Error()})
 		h.approve(d.ID)
 		if d = h.waitState(d.ID, "failed"); d.Error == nil || *d.Error != "unconfirmed" {
-			t.Fatalf("%s: disconnect after the frame went = %+v, want error unconfirmed", action, d)
+			t.Fatalf("%v: disconnect after the frame went = %+v, want error unconfirmed", err, d)
+		}
+	}
+	// Before the frame, the same errors come wrapped or from another request: the message did not go.
+	for _, err := range []error{fmt.Errorf("failed to send message node: %w", whatsmeow.ErrNotConnected),
+		fmt.Errorf("failed to get device list: %w", whatsmeow.ErrIQDisconnected)} {
+		h.clock.Add(time.Minute)
+		h.client().FailSend(err)
+		d := h.mustDraft(DraftRequest{Chat: chatA, Text: err.Error()})
+		h.approve(d.ID)
+		if d = h.waitState(d.ID, "failed"); d.Error == nil || *d.Error == "unconfirmed" {
+			t.Fatalf("%v: failure before the frame = %+v, want an ordinary failure", err, d)
 		}
 	}
 }
