@@ -167,12 +167,42 @@ func TestOpenMigratesThe020Outbox(t *testing.T) {
 	if _, err := db.w.Exec(insert020, "D2", "k2"); err != nil {
 		t.Fatalf("the 0.2.0 insert after migrating = %v", err)
 	}
-	sent, err := db.ClaimSend(ctx, "D2", "desktop", time.Date(2026, 11, 24, 12, 1, 0, 0, time.UTC))
+	sent, err := db.ClaimSend(ctx, "D2", "desktop", nil, time.Date(2026, 11, 24, 12, 1, 0, 0, time.UTC))
 	if err != nil || sent.SentText != "chego às 15h" || sent.Edited {
 		t.Fatalf("send of a 0.2.0 draft = %+v, %v", sent, err)
 	}
 	var v int
 	if err := db.w.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil || v != 2 {
 		t.Fatalf("user_version = %d, %v; want 2", v, err)
+	}
+}
+
+func TestOpenFinishesAHalfDoneOutboxMigration(t *testing.T) {
+	dir := t.TempDir()
+	schema020, err := os.ReadFile(filepath.Join("testdata", "v020_schema.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "messages.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The first run stopped between the two ALTERs.
+	for _, q := range []string{string(schema020), `ALTER TABLE outbox ADD COLUMN edited INTEGER NOT NULL DEFAULT 0`, `PRAGMA user_version = 2`} {
+		if _, err := raw.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.Exec(insert020, "D1", "k1"); err != nil {
+		t.Fatal(err)
+	}
+	raw.Close()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if d, err := db.Draft(context.Background(), "D1"); err != nil || d.SentText != "" {
+		t.Fatalf("draft after finishing the migration = %+v, %v", d, err)
 	}
 }

@@ -37,6 +37,9 @@ func avatarURL(raw string) error {
 
 func newAvatarClient(rt http.RoundTripper) *http.Client {
 	return &http.Client{Transport: rt, Timeout: avatarTimeout, CheckRedirect: func(r *http.Request, via []*http.Request) error {
+		if len(via) >= 10 {
+			return fmt.Errorf("%w: redirecionamentos demais", errAvatarRefused)
+		}
 		return avatarURL(r.URL.String())
 	}}
 }
@@ -52,9 +55,6 @@ func (s *Service) download(ctx context.Context, raw string) ([]byte, error) {
 	}
 	resp, err := s.avatars.Do(req)
 	if err != nil {
-		if errors.Is(err, errAvatarRefused) {
-			return nil, errAvatarRefused
-		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -151,17 +151,31 @@ func (s *Service) refreshAvatar(ctx context.Context, in *instance, cli Client, a
 	return in.db.SaveAvatar(ctx, account, chat, a, s.now())
 }
 
-// withAvatar puts the cached picture of the chat, as the number paired now sees it, in the draft.
-// The picture is only for show: failing to read it leaves it null.
 func (s *Service) withAvatar(ctx context.Context, in *instance, d store.Draft) store.Draft {
+	list := []store.Draft{d}
+	s.withAvatars(ctx, in, list)
+	return list[0]
+}
+
+// withAvatars puts the cached picture of each chat, as the number paired now sees it, in the drafts,
+// reading each chat once. The picture is only for show: failing to read it leaves it null.
+func (s *Service) withAvatars(ctx context.Context, in *instance, list []store.Draft) {
 	cli, _, _ := s.snapshot()
 	if cli == nil {
-		return d
+		return
 	}
-	img, err := in.db.ChatAvatar(ctx, accountOf(cli), d.Chat)
-	if err != nil {
-		s.opt.Log.Error("ler foto da conversa", "conversa", d.Chat, "erro", err)
+	account := accountOf(cli)
+	read := map[string][]byte{}
+	for i := range list {
+		chat := list[i].Chat
+		img, ok := read[chat]
+		if !ok {
+			var err error
+			if img, err = in.db.ChatAvatar(ctx, account, chat); err != nil {
+				s.opt.Log.Error("ler foto da conversa", "conversa", chat, "erro", err)
+			}
+			read[chat] = img
+		}
+		list[i].ChatAvatar = img
 	}
-	d.ChatAvatar = img
-	return d
 }

@@ -483,7 +483,7 @@ func TestRestartFailsHalfSentDraftsAndCleansCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Stands for a send cut by the process dying: the state moved, the message never went out.
-	if _, err := svc.in.db.ClaimSend(ctx, sending.ID, "desktop", clk.Now()); err != nil {
+	if _, err := svc.in.db.ClaimSend(ctx, sending.ID, "desktop", nil, clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	svc.Close()

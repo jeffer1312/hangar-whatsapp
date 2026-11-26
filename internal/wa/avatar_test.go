@@ -27,15 +27,19 @@ import (
 
 // cdn stands for WhatsApp's picture server: no socket, the files are in memory.
 type cdn struct {
-	mu    sync.Mutex
-	files map[string][]byte
-	hits  []string
+	mu        sync.Mutex
+	files     map[string][]byte
+	redirects map[string]string
+	hits      []string
 }
 
 func (c *cdn) RoundTrip(r *http.Request) (*http.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.hits = append(c.hits, r.URL.String())
+	if to, ok := c.redirects[r.URL.String()]; ok {
+		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": {to}}, Body: http.NoBody, Request: r}, nil
+	}
 	status, b := http.StatusOK, c.files[r.URL.String()]
 	if b == nil {
 		status = http.StatusNotFound
@@ -63,7 +67,7 @@ type avatarHarness struct {
 func newAvatarHarness(t *testing.T) *avatarHarness {
 	t.Helper()
 	clk := &clock{now: time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)}
-	c := &cdn{files: map[string][]byte{}}
+	c := &cdn{files: map[string][]byte{}, redirects: map[string]string{}}
 	h := &harness{t: t, dir: t.TempDir(), clients: watest.NewFactory(true)}
 	svc, err := Open(context.Background(), Options{Dir: h.dir, Version: "0.3.0", Now: clk.Now,
 		NewClient: func(d *wastore.Device, l waLog.Logger) Client { return h.clients.New(d, l) },
@@ -316,5 +320,36 @@ func TestWipeCancelsThePictureFetch(t *testing.T) {
 	}
 	if hits := h.cdn.Hits(); len(hits) != 0 {
 		t.Fatalf("downloads after the cancel = %v, want none", hits)
+	}
+}
+
+func TestChatPictureRedirectsStayOnWhatsApp(t *testing.T) {
+	h := newAvatarHarness(t)
+	evil := "https://evil.example/p.jpg"
+	h.cdn.put(evil, jpegOf(t, 8, 8))
+	h.cdn.mu.Lock()
+	h.cdn.redirects[picURL] = evil
+	h.cdn.mu.Unlock()
+	h.client().AnswerPicture(picture("P1", picURL))
+	h.draftFor(chatA, "um")
+	if a, err := h.avatar(chatA); err != nil || a.State != store.AvatarNone {
+		t.Fatalf("redirect off WhatsApp = %+v, %v; want none", a, err)
+	}
+	if hits := h.cdn.Hits(); len(hits) != 1 || hits[0] != picURL {
+		t.Fatalf("downloads = %v; want only the WhatsApp address", hits)
+	}
+
+	l := newAvatarHarness(t)
+	loop := "https://mmg.whatsapp.net/loop"
+	l.cdn.mu.Lock()
+	l.cdn.redirects[loop] = loop
+	l.cdn.mu.Unlock()
+	l.client().AnswerPicture(picture("P1", loop))
+	l.draftFor(chatA, "um")
+	if a, err := l.avatar(chatA); err != nil || a.State != store.AvatarNone {
+		t.Fatalf("redirect loop = %+v, %v; want none", a, err)
+	}
+	if hits := l.cdn.Hits(); len(hits) != 10 {
+		t.Fatalf("redirect loop downloads = %d, want 10", len(hits))
 	}
 }

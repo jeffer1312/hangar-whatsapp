@@ -312,18 +312,10 @@ func (d *DB) answer(ctx context.Context, id string, now time.Time, change func(t
 	return dr, tx.Commit()
 }
 
-// ClaimSend moves a pending draft to sending with its own text. The caps and the change share the
-// transaction, so two approvals at once cannot both pass the count or both win the same draft.
-func (d *DB) ClaimSend(ctx context.Context, id, via string, now time.Time) (Draft, error) {
-	return d.claim(ctx, id, via, nil, now)
-}
-
-// ClaimEditedSend is ClaimSend with the text the owner wrote in place of the draft's.
-func (d *DB) ClaimEditedSend(ctx context.Context, id, via, text string, now time.Time) (Draft, error) {
-	return d.claim(ctx, id, via, &text, now)
-}
-
-func (d *DB) claim(ctx context.Context, id, via string, text *string, now time.Time) (Draft, error) {
+// ClaimSend moves a pending draft to sending, with text in place of the draft's when not nil. The caps
+// and the change share the transaction, so two approvals at once cannot both pass the count or both
+// win the same draft.
+func (d *DB) ClaimSend(ctx context.Context, id, via string, text *string, now time.Time) (Draft, error) {
 	return d.answer(ctx, id, now, func(tx *sql.Tx) error {
 		minute, day, err := sendCounts(ctx, tx, now)
 		if err != nil {

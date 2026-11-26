@@ -284,9 +284,7 @@ func (s *Service) Drafts(ctx context.Context, state string) ([]store.Draft, erro
 			return nil, err
 		}
 		list, err := in.db.Drafts(ctx, state)
-		for i := range list {
-			list[i] = s.withAvatar(ctx, in, list[i])
-		}
+		s.withAvatars(ctx, in, list)
 		return list, err
 	})
 }
@@ -355,11 +353,7 @@ func (s *Service) approve(ctx context.Context, id, via string, text *string) (st
 		if err := s.checkReachout(ctx, in); err != nil {
 			return store.Draft{}, err
 		}
-		if text == nil {
-			d, err = in.db.ClaimSend(ctx, id, via, s.now())
-		} else {
-			d, err = in.db.ClaimEditedSend(ctx, id, via, *text, s.now())
-		}
+		d, err = in.db.ClaimSend(ctx, id, via, text, s.now())
 		if errors.Is(err, store.ErrExpired) {
 			s.sweep(ctx, in, false)
 		}
