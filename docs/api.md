@@ -100,7 +100,11 @@ outros.
 ## Processo
 
 - `--version` imprime `hangar-whatsapp <versão> (api <n>)`; `api 2` tem o envio por rascunho (C5); `api 3`, a
-  edição do texto antes do envio, a foto da conversa e o tipo das recentes (C7).
+  edição do texto antes do envio, a foto da conversa e o tipo das recentes (C7). O formato não muda: o Hangar
+  instalado lê essa linha exata.
+- `--schema-version` imprime só a versão do esquema do `messages.db` que este binário grava (o
+  `user_version`, hoje `2`), seguida de `\n`, e sai com 0 sem abrir a pasta `--data`. Binário anterior a essa
+  flag sai com código diferente de 0.
 - Mensagem só sai por rascunho que o dono aprovou (`POST /v1/outbox/{id}/send`), com "digitando", upload do
   anexo e a mensagem. O whatsmeow manda sozinho os recibos de entrega (os mesmos que o celular já manda) e
   nenhum recibo de leitura; o serviço não marca como lida nem aparece "online". Fora isso, o login, o logout
@@ -120,6 +124,13 @@ outros.
   `connected` nesse meio-tempo.
 - Sai com código 3 quando o `messages.db` é de um esquema mais novo (`schema_newer`): só um binário mais
   novo abre esses dados.
+- Antes de subir o `user_version` do `messages.db` de `v` para `--schema-version` (com `0 < v`), grava a cópia
+  `<data>/messages.db.schema<v>.bak` (`VACUUM INTO`, por um nome temporário e rename: o `.bak` presente está
+  sempre inteiro). Há uma por `v`, sobrescrita na migração seguinte do mesmo `v`; é ela que o Hangar repõe se o
+  binário novo não ficar de pé. Banco novo (`v = 0`) e coluna acrescentada sem subir o `user_version` (como na
+  v0.3.0) não fazem cópia.
+- Sai com código 4 (`backup_failed`) quando essa cópia não pôde ser gravada: nada migrou e o `messages.db` ficou
+  como estava.
 
 ## C5. Envio por rascunho aprovado (api 2)
 

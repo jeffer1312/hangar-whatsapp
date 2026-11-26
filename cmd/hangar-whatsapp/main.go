@@ -25,8 +25,12 @@ import (
 
 var version = "dev"
 
-// exitSchemaNewer tells the supervisor that only a newer binary can open this data.
-const exitSchemaNewer = 3
+const (
+	// exitSchemaNewer tells the supervisor that only a newer binary can open this data.
+	exitSchemaNewer = 3
+	// exitBackupFailed: the copy before a migration could not be written, so messages.db was left as it was.
+	exitBackupFailed = 4
+)
 
 func main() { os.Exit(run(os.Args[1:], os.Stdout, os.Stderr)) }
 
@@ -44,11 +48,16 @@ func run(args []string, stdout, stderr io.Writer) int {
 	data := fs.String("data", defaultData(), "pasta dos dados (messages.db, session.db, media/, control.json, control.key)")
 	from := fs.String("import", "", "importa a pasta dados/ do whatsapp-arquivo para --data, que precisa estar vazia, e sai")
 	showVersion := fs.Bool("version", false, "mostra a versão e sai")
+	showSchema := fs.Bool("schema-version", false, "mostra a versão do esquema do messages.db que este binário grava e sai, sem abrir os dados")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *showVersion {
 		fmt.Fprintf(stdout, "hangar-whatsapp %s (api %d)\n", version, wa.API)
+		return 0
+	}
+	if *showSchema {
+		fmt.Fprintln(stdout, store.SchemaVersion)
 		return 0
 	}
 	if *from != "" {
@@ -62,12 +71,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 	log := slog.New(slog.NewTextHandler(stderr, nil))
 	if err := serve(*data, log); err != nil {
 		log.Error("encerrado com erro", "erro", err)
-		if errors.Is(err, store.ErrSchemaNewer) {
-			return exitSchemaNewer
-		}
-		return 1
+		return exitCode(err)
 	}
 	return 0
+}
+
+func exitCode(err error) int {
+	switch {
+	case errors.Is(err, store.ErrSchemaNewer):
+		return exitSchemaNewer
+	case errors.Is(err, store.ErrBackupFailed):
+		return exitBackupFailed
+	}
+	return 1
 }
 
 func importPrototype(from, data string) error {

@@ -78,6 +78,101 @@ func TestOpenMigratesVersion1(t *testing.T) {
 	}
 }
 
+// version1 leaves in dir a messages.db at user_version 1 with one message and no outbox.
+func version1(t *testing.T, dir string) {
+	t.Helper()
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, q := range []string{
+		`INSERT INTO messages (chat, id, from_me, at, kind, source) VALUES ('5564@s.whatsapp.net', 'M1', 0, '2026-11-22T10:00:00Z', 'text', 'whatsapp')`,
+		`DROP TABLE IF EXISTS outbox`, `DROP TABLE IF EXISTS settings`, `PRAGMA user_version = 1`,
+	} {
+		if _, err := db.w.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// inspect reads user_version, the outbox table count and the message count of a SQLite file.
+func inspect(t *testing.T, path string) (version, outbox, messages int) {
+	t.Helper()
+	raw, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	if err := raw.QueryRow(`SELECT (SELECT user_version FROM pragma_user_version),
+			(SELECT count(*) FROM sqlite_master WHERE name = 'outbox'), (SELECT count(*) FROM messages)`).Scan(&version, &outbox, &messages); err != nil {
+		t.Fatal(err)
+	}
+	return
+}
+
+func TestBackupBeforeRaisingVersion(t *testing.T) {
+	dir := t.TempDir()
+	version1(t, dir)
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if v, outbox, messages := inspect(t, filepath.Join(dir, "messages.db.schema1.bak")); v != 1 || outbox != 0 || messages != 1 {
+		t.Fatalf("backup = version %d, outbox tables %d, messages %d; want 1, 0, 1", v, outbox, messages)
+	}
+}
+
+func TestBackupOverwritesTheOldOne(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "messages.db.schema1.bak"), []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	version1(t, dir)
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if v, _, messages := inspect(t, filepath.Join(dir, "messages.db.schema1.bak")); v != 1 || messages != 1 {
+		t.Fatalf("backup = version %d, messages %d; want 1, 1", v, messages)
+	}
+}
+
+func TestNoBackupWithoutRaisingVersion(t *testing.T) {
+	dir := t.TempDir()
+	for range 2 {
+		db, err := Open(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+	}
+	if baks, _ := filepath.Glob(filepath.Join(dir, "*.bak*")); len(baks) != 0 {
+		t.Fatalf("backups without a version change: %v", baks)
+	}
+}
+
+func TestBackupFailureLeavesTheDatabaseAlone(t *testing.T) {
+	dir := t.TempDir()
+	version1(t, dir)
+	// A non-empty folder where the copy goes cannot be replaced, even by root.
+	if err := os.MkdirAll(filepath.Join(dir, "messages.db.schema1.bak", "x"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(dir)
+	if err == nil {
+		db.Close()
+	}
+	if !errors.Is(err, ErrBackupFailed) {
+		t.Fatalf("Open with an unwritable backup = %v, want ErrBackupFailed", err)
+	}
+	if v, outbox, messages := inspect(t, MessagesPath(dir)); v != 1 || outbox != 0 || messages != 1 {
+		t.Fatalf("after the failed backup = version %d, outbox tables %d, messages %d; want 1, 0, 1", v, outbox, messages)
+	}
+}
+
 func TestOpenAddsTheAccountToVersion1Messages(t *testing.T) {
 	dir := t.TempDir()
 	raw, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "messages.db"))

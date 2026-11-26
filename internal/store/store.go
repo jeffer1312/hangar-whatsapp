@@ -26,6 +26,8 @@ const TimeLayout = "2006-01-02T15:04:05Z"
 var (
 	ErrSchemaNewer = errors.New("schema_newer")
 	ErrBusy        = errors.New("busy")
+	// ErrBackupFailed: the copy of messages.db before raising its version could not be written; nothing migrated.
+	ErrBackupFailed = errors.New("backup_failed")
 )
 
 const defaultQueryTimeout = 5 * time.Second
@@ -75,7 +77,7 @@ func Open(dir string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := migrate(w); err != nil {
+	if err := migrate(w, MessagesPath(dir)); err != nil {
 		w.Close()
 		return nil, err
 	}
@@ -89,13 +91,18 @@ func Open(dir string) (*DB, error) {
 	return &DB{w: w, r: r, dir: dir, QueryTimeout: defaultQueryTimeout}, nil
 }
 
-func migrate(w *sql.DB) error {
+func migrate(w *sql.DB, path string) error {
 	var v int
 	if err := w.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
 	}
 	if v > SchemaVersion {
 		return fmt.Errorf("%w: messages.db is version %d, this binary knows up to %d", ErrSchemaNewer, v, SchemaVersion)
+	}
+	if v > 0 && v < SchemaVersion {
+		if err := backup(w, path, v); err != nil {
+			return fmt.Errorf("%w: copy of messages.db at version %d: %w", ErrBackupFailed, v, err)
+		}
 	}
 	// Columns are added without raising user_version, so that older binaries still open the file; each
 	// one is checked on its own, since a run may stop between two of them.
@@ -115,6 +122,21 @@ func migrate(w *sql.DB) error {
 	}
 	_, err := w.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion))
 	return err
+}
+
+// backup writes <path>.schema<v>.bak before the version goes up, for the supervisor to put back if
+// the new binary does not stay up. It goes through a temporary name so a .bak on disk is always whole.
+func backup(w *sql.DB, path string, v int) error {
+	bak := fmt.Sprintf("%s.schema%d.bak", path, v)
+	tmp := bak + ".tmp"
+	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	if _, err := w.Exec(`VACUUM INTO ?`, tmp); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, bak)
 }
 
 // addColumn adds a column to a table that exists without it.
