@@ -25,7 +25,7 @@ import (
 	"github.com/jeffer1312/hangar-whatsapp/internal/store"
 )
 
-// API 2 adds the outbox (C5); 3 the edited send, the chat picture and the kind of recent messages (C7).
+// API is the contract version clients read from status, control.json and --version (docs/api.md).
 const API = 3
 
 // Pairing codes have no published expiry; the login socket closes when the QR codes run out

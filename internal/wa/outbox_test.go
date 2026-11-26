@@ -936,9 +936,9 @@ func TestEditedTextIsCheckedLikeANewDraft(t *testing.T) {
 
 	zip := writeFile(t, filepath.Join(t.TempDir(), "a.zip"), "PK")
 	f := h.mustDraft(DraftRequest{Chat: chatA, Text: "segue", File: zip, Origin: "notebook::s2"})
-	got, err := h.svc.ApproveEditedDraft(context.Background(), f.ID, "desktop", "")
+	got, err := h.svc.ApproveEditedDraft(context.Background(), f.ID, "desktop", " \r\n ")
 	if err != nil || got.SentText != "" || !got.Edited {
-		t.Fatalf("empty edited text with a file = %+v, %v", got, err)
+		t.Fatalf("blank edited text with a file = %+v, %v; want sent_text empty", got, err)
 	}
 	h.waitState(f.ID, "sent")
 	if doc := h.client().Sent()[1].Message.GetDocumentMessage(); doc == nil || doc.Caption != nil {

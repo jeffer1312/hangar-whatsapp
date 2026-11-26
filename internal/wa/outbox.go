@@ -338,6 +338,10 @@ func (s *Service) approve(ctx context.Context, id, via string, text *string) (st
 			if err := checkText(*text, d.File != nil); err != nil {
 				return store.Draft{}, err
 			}
+			// Blank is allowed only with a file, which then goes without a caption.
+			if strings.TrimSpace(*text) == "" {
+				*text = ""
+			}
 			if *text == newlines.Replace(d.Text) {
 				text = nil
 			}

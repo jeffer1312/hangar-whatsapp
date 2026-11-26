@@ -229,8 +229,8 @@ Mesma assinatura e formato de erro. Um binário `api 2` não tem a rota `send-ed
   `pending`.
 - Igual ao texto do rascunho (os dois normalizados): é um envio normal, `edited = false` e `sent_text` é o texto
   do rascunho.
-- Diferente: `edited = true`, e o que sai é o texto normalizado (com anexo, como legenda; vazio, documento sem
-  legenda). `text` do rascunho não muda: continua o que a sessão pediu.
+- Diferente: `edited = true`, e o que sai é o texto normalizado (com anexo, como legenda; vazio ou só espaços,
+  documento sem legenda e `sent_text` vazio). `text` do rascunho não muda: continua o que a sessão pediu.
 - Mesmos erros e tetos do `send`: 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`,
   `new_contact`, `reachout_locked`; 429 `rate_limited`; 400 `via` inválido.
 - 202 com o rascunho em `sending`; o cliente confere `sent_text`.
@@ -266,4 +266,5 @@ a resposta traz `"state":"sending","edited":true,"sent_text":"chego às 16h\nabr
 ### Dados
 
 `outbox` ganha `edited` e `sent_text` por `ALTER TABLE` na subida; `avatars` e `avatar_fetches` são tabelas novas.
-O `user_version` continua 2: um binário 0.2 ainda abre o arquivo e grava rascunhos nele.
+O `user_version` continua 2: um binário 0.2 ainda abre o arquivo e grava rascunhos nele. A cada subida, rascunho
+aprovado sem `sent_text` (pela 0.2, que não o grava) recebe o próprio `text`, que foi o que saiu.

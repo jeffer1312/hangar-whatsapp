@@ -97,9 +97,8 @@ func migrate(w *sql.DB) error {
 	if v > SchemaVersion {
 		return fmt.Errorf("%w: messages.db is version %d, this binary knows up to %d", ErrSchemaNewer, v, SchemaVersion)
 	}
-	// A version 1 messages table predates account (the schema's index on it needs the column first), and a
-	// 0.2 outbox the edit. The version stays 2 so that a 0.2 binary still opens the file. Each column is
-	// checked on its own: a run stopped between two of them leaves one behind.
+	// Columns are added without raising user_version, so that older binaries still open the file; each
+	// one is checked on its own, since a run may stop between two of them.
 	for _, c := range [][3]string{{"messages", "account", "TEXT NOT NULL DEFAULT ''"},
 		{"outbox", "edited", "INTEGER NOT NULL DEFAULT 0"}, {"outbox", "sent_text", "TEXT NOT NULL DEFAULT ''"}} {
 		if err := addColumn(w, c[0], c[1], c[2]); err != nil {
@@ -108,6 +107,11 @@ func migrate(w *sql.DB) error {
 	}
 	if _, err := w.Exec(schema); err != nil {
 		return fmt.Errorf("create tables: %w", err)
+	}
+	// A binary without sent_text approves drafts without writing it; what it sent was the draft's text.
+	if _, err := w.Exec(`UPDATE outbox SET sent_text = text
+		WHERE state IN ('sending', 'sent', 'failed') AND sent_text = '' AND edited = 0`); err != nil {
+		return fmt.Errorf("fill outbox.sent_text: %w", err)
 	}
 	_, err := w.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion))
 	return err

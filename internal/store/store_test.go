@@ -149,7 +149,12 @@ func TestOpenMigratesThe020Outbox(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := raw.Exec(insert020, "D1", "k1"); err != nil {
+	for _, id := range []string{"D1", "S1"} {
+		if _, err := raw.Exec(insert020, id, "k"+id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := raw.Exec(`UPDATE outbox SET state = 'sent', via = 'desktop', answered_at = '2026-11-24T12:01:00Z' WHERE id = 'S1'`); err != nil {
 		t.Fatal(err)
 	}
 	raw.Close()
@@ -160,6 +165,9 @@ func TestOpenMigratesThe020Outbox(t *testing.T) {
 	}
 	defer db.Close()
 	ctx := context.Background()
+	if s, err := db.Draft(ctx, "S1"); err != nil || s.SentText != "chego às 15h" || s.Edited {
+		t.Fatalf("draft the 0.2.0 sent = sent_text %q edited %v, %v; want its text", s.SentText, s.Edited, err)
+	}
 	d, err := db.Draft(ctx, "D1")
 	if err != nil || d.Text != "chego às 15h" || d.Edited || d.SentText != "" || len(d.Recent) != 1 || d.Recent[0].Kind != "" {
 		t.Fatalf("0.2.0 draft after migrating = %+v, %v", d, err)
