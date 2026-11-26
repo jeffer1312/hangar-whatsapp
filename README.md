@@ -26,6 +26,7 @@ mesma release: não protege contra uma release comprometida.
 hangar-whatsapp [--data ~/.hangar/whatsapp]   # serviço: API em 127.0.0.1, porta em control.json
 hangar-whatsapp --version
 hangar-whatsapp --schema-version                # versão do esquema do messages.db, sem abrir os dados
+hangar-whatsapp --data-schema-version --data ~/.hangar/whatsapp   # versão do esquema do messages.db da pasta, só lendo
 hangar-whatsapp --data ~/.hangar/whatsapp --import ~/Projetos/whatsapp-arquivo/dados
 ```
 

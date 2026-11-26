@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -43,6 +44,94 @@ func TestExitCode(t *testing.T) {
 		if got := exitCode(c.err); got != c.want {
 			t.Errorf("exitCode(%v) = %d, want %d", c.err, got, c.want)
 		}
+	}
+}
+
+// dataSchema runs --data-schema-version on data and returns the exit code, stdout and stderr.
+func dataSchema(t *testing.T, args ...string) (int, string, string) {
+	t.Helper()
+	var out, errOut bytes.Buffer
+	code := run(append([]string{"--data-schema-version"}, args...), &out, &errOut)
+	return code, out.String(), errOut.String()
+}
+
+// walDB leaves a WAL-mode messages.db at user_version v in data and returns the open writer.
+func walDB(t *testing.T, data string, v int) *sql.DB {
+	t.Helper()
+	w, err := sql.Open("sqlite", "file:"+store.MessagesPath(data)+"?_pragma=journal_mode(WAL)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.SetMaxOpenConns(1)
+	for _, q := range []string{`CREATE TABLE IF NOT EXISTS t (x)`, fmt.Sprintf(`PRAGMA user_version = %d`, v)} {
+		if _, err := w.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return w
+}
+
+func TestDataSchemaVersionWithoutTheFile(t *testing.T) {
+	data := filepath.Join(t.TempDir(), "absent")
+	if code, out, errOut := dataSchema(t, "--data", data); code != 0 || out != "0\n" {
+		t.Fatalf("--data-schema-version on a missing folder = %d %q, stderr %q; want 0 \"0\\n\"", code, out, errOut)
+	}
+	if _, err := os.Stat(data); !os.IsNotExist(err) {
+		t.Fatalf("--data-schema-version created --data: %v", err)
+	}
+}
+
+func TestDataSchemaVersionLeavesTheFileAlone(t *testing.T) {
+	data := t.TempDir()
+	walDB(t, data, 1).Close()
+	path := store.MessagesPath(data)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := dataSchema(t, "--data", data); code != 0 || out != "1\n" {
+		t.Fatalf("--data-schema-version = %d %q, stderr %q; want 0 \"1\\n\"", code, out, errOut)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		t.Fatalf("messages.db changed: %d %v → %d %v", before.Size(), before.ModTime(), after.Size(), after.ModTime())
+	}
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if _, err := os.Stat(path + suffix); !os.IsNotExist(err) {
+			t.Errorf("%s left behind: %v", suffix, err)
+		}
+	}
+}
+
+func TestDataSchemaVersionWhileAnotherBinaryWrites(t *testing.T) {
+	data := t.TempDir()
+	w := walDB(t, data, 1)
+	defer w.Close()
+	// The raise sits in the WAL, not yet in the main file.
+	if _, err := w.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := dataSchema(t, "--data", data); code != 0 || out != "2\n" {
+		t.Fatalf("--data-schema-version with a writer = %d %q, stderr %q; want 0 \"2\\n\"", code, out, errOut)
+	}
+}
+
+func TestDataSchemaVersionOnAFileThatIsNotSQLite(t *testing.T) {
+	data := t.TempDir()
+	if err := os.WriteFile(store.MessagesPath(data), []byte("not a database, just text long enough to have a header"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code, out, errOut := dataSchema(t, "--data", data); code != 1 || out != "" || errOut == "" {
+		t.Fatalf("--data-schema-version on a text file = %d %q, stderr %q; want 1, nothing, a reason", code, out, errOut)
+	}
+}
+
+func TestDataSchemaVersionNeedsData(t *testing.T) {
+	if code, out, _ := dataSchema(t); code != 2 || out != "" {
+		t.Fatalf("--data-schema-version without --data = %d %q; want 2", code, out)
 	}
 }
 

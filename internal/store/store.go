@@ -125,6 +125,34 @@ func migrate(w *sql.DB, dir string) error {
 	return err
 }
 
+// DataSchemaVersion reads the user_version of dir's messages.db, 0 when there is none. It opens the file
+// read-only, so it can run beside the binary that has it open, and leaves nothing behind.
+func DataSchemaVersion(dir string) (int, error) {
+	path := MessagesPath(dir)
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	query := "?mode=ro&_pragma=busy_timeout(5000)"
+	// A read-only open of a WAL file creates -wal and -shm and cannot delete them. With no -wal on disk
+	// nobody is writing and the main file is whole, so immutable reads it without creating anything.
+	if _, err := os.Stat(path + "-wal"); errors.Is(err, fs.ErrNotExist) {
+		query = "?mode=ro&immutable=1"
+	}
+	db, err := sql.Open("sqlite", "file:"+path+query)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	var v int
+	if err := db.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
+		return 0, fmt.Errorf("read %s: %w", path, err)
+	}
+	return v, nil
+}
+
 // backupPrefix starts the name of every copy backup writes next to messages.db.
 const backupPrefix = "messages.db.schema"
 

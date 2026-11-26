@@ -49,6 +49,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	from := fs.String("import", "", "importa a pasta dados/ do whatsapp-arquivo para --data, que precisa estar vazia, e sai")
 	showVersion := fs.Bool("version", false, "mostra a versão e sai")
 	showSchema := fs.Bool("schema-version", false, "mostra a versão do esquema do messages.db que este binário grava e sai, sem abrir os dados")
+	dataSchema := fs.Bool("data-schema-version", false, "mostra a versão do esquema do messages.db em --data (0 sem arquivo) e sai, só lendo")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -58,6 +59,21 @@ func run(args []string, stdout, stderr io.Writer) int {
 	}
 	if *showSchema {
 		fmt.Fprintln(stdout, store.SchemaVersion)
+		return 0
+	}
+	if *dataSchema {
+		given := false
+		fs.Visit(func(f *flag.Flag) { given = given || f.Name == "data" })
+		if !given {
+			fmt.Fprintln(stderr, "--data-schema-version precisa de --data")
+			return 2
+		}
+		v, err := store.DataSchemaVersion(*data)
+		if err != nil {
+			fmt.Fprintln(stderr, "erro:", err)
+			return 1
+		}
+		fmt.Fprintln(stdout, v)
 		return 0
 	}
 	if *from != "" {
