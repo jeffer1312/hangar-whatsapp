@@ -3,6 +3,7 @@ package wa
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -23,7 +24,8 @@ import (
 	"github.com/jeffer1312/hangar-whatsapp/internal/store"
 )
 
-const API = 1
+// API 2 adds the outbox (C5).
+const API = 2
 
 // Pairing codes have no published expiry; the login socket closes when the QR codes run out
 // (60 s plus five of 20 s).
@@ -70,6 +72,8 @@ type Options struct {
 	// NewClient gets the logger whatsmeow must write to: the service watches some of its warnings.
 	NewClient func(*wastore.Device, waLog.Logger) Client
 	Log       *slog.Logger
+	// Wait holds the typing indicator before a send; tests skip it.
+	Wait func(ctx context.Context, d time.Duration) error
 }
 
 type StatusError struct {
@@ -91,6 +95,16 @@ type Status struct {
 	Totals            store.Totals `json:"totals"`
 	Since             *string      `json:"since"`
 	LastMessageAt     *string      `json:"last_message_at"`
+	Outgoing          Outgoing     `json:"send"`
+	// Until when WhatsApp refuses messages to new contacts; null without a lock.
+	ReachoutLockedUntil *string `json:"reachout_locked_until"`
+}
+
+type Outgoing struct {
+	LastMinute int `json:"last_minute"`
+	Today      int `json:"today"`
+	PerMinute  int `json:"per_minute"`
+	PerDay     int `json:"per_day"`
 }
 
 // instance is everything opened on the data folder; wipe closes it and opens a new one.
@@ -126,6 +140,10 @@ type Service struct {
 	// After a quiet stretch of 2×reactivateMaxWait it starts over.
 	reactivateBase, reactivateWait time.Duration
 	reactivatedAt                  time.Time
+
+	// reachout orders a client's lock notice (generation check and write) with Pair replacing the
+	// client, without holding mu during the database write.
+	reachout sync.Mutex
 }
 
 func Open(ctx context.Context, opt Options) (*Service, error) {
@@ -137,6 +155,9 @@ func Open(ctx context.Context, opt Options) (*Service, error) {
 	}
 	if opt.NewClient == nil {
 		opt.NewClient = NewRealClient
+	}
+	if opt.Wait == nil {
+		opt.Wait = wait
 	}
 	dir, err := filepath.Abs(opt.Dir)
 	if err != nil {
@@ -185,6 +206,11 @@ func (s *Service) start() (err error) {
 	}
 	in := &instance{db: db, container: container}
 	in.ctx, in.cancel = context.WithCancel(s.root)
+	// Before any worker starts: a draft left sending would otherwise stay so with nobody to finish it.
+	if err := s.recoverOutbox(in); err != nil {
+		in.cancel()
+		return fmt.Errorf("recuperar rascunhos: %w", err)
+	}
 	in.archive = &archiver{ctx: in.ctx, db: db, log: s.opt.Log}
 	in.media = newMedia(db, s.opt.Dir, s.opt.Log, s.now, s.connectedClient)
 	s.in = in
@@ -197,7 +223,11 @@ func (s *Service) start() (err error) {
 		in.wg.Go(func() { s.connect(in.ctx, g, cli) })
 	}
 	s.mu.Unlock()
+	if device.ID != nil {
+		s.adoptMessages(in, cli)
+	}
 	in.wg.Go(func() { in.media.run(in.ctx) })
+	in.wg.Go(func() { s.expireLoop(in) })
 	return nil
 }
 
@@ -318,6 +348,18 @@ func (s *Service) connectedClient() Client {
 	return s.cli
 }
 
+// pairedClient is the connected client, or why there is none.
+func (s *Service) pairedClient() (Client, error) {
+	switch cli, _, state := s.snapshot(); {
+	case state == StateConnected && cli != nil:
+		return cli, nil
+	case state == StateOutdated:
+		return nil, ErrOutdated
+	default:
+		return nil, ErrNotPaired
+	}
+}
+
 // snapshot is the current client, its generation and state, read together.
 func (s *Service) snapshot() (Client, int, string) {
 	s.mu.Lock()
@@ -357,6 +399,7 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 	switch e := raw.(type) {
 	case *events.Connected:
 		s.opt.Log.Info("conectado ao WhatsApp")
+		s.adoptMessages(in, cli)
 	case *events.Disconnected:
 		s.opt.Log.Warn("conexão com o WhatsApp caiu")
 	case *events.StreamReplaced:
@@ -375,6 +418,14 @@ func (s *Service) event(in *instance, g int, cli Client, raw any) {
 		s.update(g, func() { s.resetLocked(StateOutdated, "") })
 	case *events.MediaRetry:
 		in.media.reply(e)
+	case *events.NotifyAccountReachoutTimelock:
+		// A client Pair replaced cannot set or lift the new one's lock. The write stays outside mu: the
+		// archiver may hold the database for seconds.
+		s.reachout.Lock()
+		if s.current(g) {
+			s.lockReachout(in, e)
+		}
+		s.reachout.Unlock()
 	case *events.Message:
 		if media, _ := in.archive.message(cli, e, types.EmptyJID); media {
 			in.media.wake()
@@ -391,6 +442,8 @@ func (s *Service) Pair(phone string) error {
 		return ErrBadPhone
 	}
 	_, err := with(s, func(in *instance) (struct{}, error) {
+		s.reachout.Lock()
+		defer s.reachout.Unlock()
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch s.state {
@@ -514,6 +567,7 @@ func (s *Service) Wipe(ctx context.Context) (string, error) {
 		store.RemoveDB(store.MessagesPath(s.opt.Dir)),
 		store.RemoveDB(store.SessionPath(s.opt.Dir)),
 		os.RemoveAll(filepath.Join(s.opt.Dir, "media")),
+		os.RemoveAll(outboxDir(s.opt.Dir)),
 		s.start(),
 	}
 	return result, errors.Join(errs...)
@@ -540,14 +594,31 @@ func maskPhone(user string) string {
 	return "+" + user[:4] + "••••" + user[len(user)-4:]
 }
 
+// adoptMessages gives the messages archived before the number was kept to the number paired now.
+func (s *Service) adoptMessages(in *instance, cli Client) {
+	if err := in.db.AdoptMessages(in.ctx, accountOf(cli)); err != nil {
+		s.opt.Log.Error("ligar as mensagens antigas ao número pareado", "erro", err)
+	}
+}
+
 func (s *Service) Status(ctx context.Context) (Status, error) {
 	return with(s, func(in *instance) (Status, error) {
 		sum, err := in.db.Totals(ctx)
 		if err != nil {
 			return Status{}, err
 		}
+		minute, day, err := in.db.CountSends(ctx, s.now())
+		if err != nil {
+			return Status{}, err
+		}
+		locked, err := s.reachoutLocked(ctx, in)
+		if err != nil {
+			return Status{}, err
+		}
 		st := Status{API: API, Version: s.opt.Version, TZ: s.tz, Totals: sum.Totals,
-			Since: optional(sum.Since), LastMessageAt: optional(sum.LastMessageAt)}
+			Since: optional(sum.Since), LastMessageAt: optional(sum.LastMessageAt),
+			Outgoing:            Outgoing{LastMinute: minute, Today: day, PerMinute: store.SendsPerMinute, PerDay: store.SendsPerDay},
+			ReachoutLockedUntil: optional(locked)}
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		st.State = s.state
@@ -581,12 +652,8 @@ func (s *Service) Search(ctx context.Context, q, chat string, limit int) ([]stor
 // RequestMedia marks old media for the phone to send; each one is a notification on the phone.
 func (s *Service) RequestMedia(ctx context.Context, chat, id, since string) (store.MediaRequest, error) {
 	return with(s, func(in *instance) (store.MediaRequest, error) {
-		switch _, _, state := s.snapshot(); state {
-		case StateConnected:
-		case StateOutdated:
-			return store.MediaRequest{}, ErrOutdated
-		default:
-			return store.MediaRequest{}, ErrNotPaired
+		if _, err := s.pairedClient(); err != nil {
+			return store.MediaRequest{}, err
 		}
 		r, err := in.db.RequestMedia(ctx, chat, id, since, s.now())
 		if err == nil && r.Requested > 0 {

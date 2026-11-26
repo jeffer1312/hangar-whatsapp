@@ -12,7 +12,7 @@ import (
 
 func TestVersion(t *testing.T) {
 	var out bytes.Buffer
-	if code := run([]string{"--version"}, &out, &out); code != 0 || strings.TrimSpace(out.String()) != "hangar-whatsapp dev (api 1)" {
+	if code := run([]string{"--version"}, &out, &out); code != 0 || strings.TrimSpace(out.String()) != "hangar-whatsapp dev (api 2)" {
 		t.Fatalf("--version = %d %q", code, out.String())
 	}
 }

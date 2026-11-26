@@ -1,9 +1,11 @@
-// Package watest has a stand-in for *whatsmeow.Client: no socket, no phone, nothing sent.
+// Package watest has a stand-in for *whatsmeow.Client: no socket, no phone; sends are only recorded.
 package watest
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"sync"
@@ -33,6 +35,83 @@ type Client struct {
 	retries  int
 	// Set before the event that triggers them: what DownloadToFile and SendMediaRetryReceipt return.
 	downloadErr, retryErr, logoutErr error
+	sendErr                          error
+	sendAnswered                     bool
+	sent                             []Sent
+	presences                        []string
+	uploads                          [][]byte
+}
+
+// Sent is a message handed to SendMessage; nothing leaves the test.
+type Sent struct {
+	To      types.JID
+	Message *waE2E.Message
+}
+
+func (f *Client) FailSend(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sendErr, f.sendAnswered = err, false
+}
+
+// FailSendAfterFrame fails like whatsmeow does once the frame went and the server's answer was a
+// disconnect: the response carries the time it waited for that answer.
+func (f *Client) FailSendAfterFrame(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sendErr, f.sendAnswered = err, true
+}
+
+func (f *Client) SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.presences = append(f.presences, string(state)+" "+jid.String())
+	return nil
+}
+
+func (f *Client) UploadReader(ctx context.Context, r io.Reader, tmp io.ReadWriteSeeker, mt whatsmeow.MediaType) (whatsmeow.UploadResponse, error) {
+	b, err := io.ReadAll(r)
+	if err != nil {
+		return whatsmeow.UploadResponse{}, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.uploads = append(f.uploads, b)
+	sum := sha256.Sum256(b)
+	return whatsmeow.UploadResponse{URL: "https://mmg.whatsapp.test/d/1", DirectPath: "/v/t62/d1", MediaKey: make([]byte, 32),
+		FileSHA256: sum[:], FileEncSHA256: sum[:], FileLength: uint64(len(b))}, nil
+}
+
+func (f *Client) SendMessage(ctx context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sent = append(f.sent, Sent{To: to, Message: msg})
+	if f.sendErr != nil {
+		var resp whatsmeow.SendResponse
+		if f.sendAnswered {
+			resp.DebugTimings.Resp = time.Millisecond
+		}
+		return resp, f.sendErr
+	}
+	return whatsmeow.SendResponse{ID: fmt.Sprintf("3EB0SENT%d", len(f.sent)), Timestamp: time.Date(2026, 11, 24, 12, 0, 5, 0, time.UTC)}, nil
+}
+
+func (f *Client) Sent() []Sent {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]Sent(nil), f.sent...)
+}
+
+func (f *Client) Presences() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.presences...)
+}
+
+func (f *Client) Uploads() [][]byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][]byte(nil), f.uploads...)
 }
 
 func (f *Client) Fail(download, retry error) {

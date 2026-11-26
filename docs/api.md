@@ -1,11 +1,11 @@
-# API do hangar-whatsapp (C1, C2)
+# API do hangar-whatsapp (C1, C2, C5)
 
 Contrato com o Hangar. Forma completa no plano `docs/2026-11-22-whatsapp-somente-leitura.md` do Hangar; aqui
 ficam os detalhes que o cliente precisa para falar com o binário.
 
 ## C1. `control.json` e `control.key`
 
-- `control.json`: `{"version":1,"api":1,"port":<u16>,"pid":<u32>}`, reescrito a cada subida (tmp + rename)
+- `control.json`: `{"version":1,"api":2,"port":<u16>,"pid":<u32>}`, reescrito a cada subida (tmp + rename)
   antes de a porta aceitar pedidos. Porta escolhida pelo sistema em `127.0.0.1`.
 - `control.key`: 32 bytes aleatórios em hex (64 caracteres e `\n`), criado na primeira subida. **A chave do
   HMAC são os 32 bytes decodificados**, não o texto hex. Modo 0600, pasta `--data` 0700.
@@ -64,6 +64,8 @@ Parâmetros:
   móvel, teto 200). 429 só quando a janela já está cheia e havia mídia para pedir. Cada pedido chega ao
   celular uma vez: sem resposta, ele fecha e a mídia continua `expired`, para pedir de novo.
 
+As rotas `/v1/outbox*` (envio por rascunho aprovado) estão na seção C5.
+
 Erro: `{"detail":{"code","msg"}}`. Além dos códigos do contrato (`unauthorized` 401, `bad_request` 400,
 `not_paired` 409, `busy` 503, `outdated` 409, `rate_limited` 429): `internal` 500 para falha inesperada e
 `bad_request` 404 para rota desconhecida.
@@ -86,16 +88,21 @@ Chrome (Linux)`) só vêm em `connected`; nos outros estados são null.
 
 `pair_code_expires_at` é 160 s depois do pedido (o socket de login fecha quando os QR acabam).
 
+`send`: `{"last_minute","today","per_minute":3,"per_day":20}`, envios aprovados no último minuto e nas
+últimas 24 h (janela móvel), contando os que falharam. `reachout_locked_until`: até quando o WhatsApp recusa
+mensagem a contato novo (UTC), ou null sem trava.
+
 `media_error` de uma mensagem: `expired` (só o celular tem; pode ser pedida), `phone_refused`, `unavailable`
 (o ProChat não tinha), `unreadable`, `lost`. `totals.media_phone_only` conta `expired`; `media_lost`, os
 outros.
 
 ## Processo
 
-- `--version` imprime `hangar-whatsapp <versão> (api <n>)`.
-- Só leitura quer dizer que nenhuma mensagem é enviada. O whatsmeow manda sozinho os recibos de entrega
-  (os mesmos que o celular já manda) e nenhum recibo de leitura. Fora o login, o logout (`logout`,
-  `wipe`), as reconexões e o download de mídia da CDN do WhatsApp, a única chamada de saída do serviço é o
+- `--version` imprime `hangar-whatsapp <versão> (api <n>)`; `api 2` tem o envio por rascunho (C5).
+- Mensagem só sai por rascunho que o dono aprovou (`POST /v1/outbox/{id}/send`), com "digitando", upload do
+  anexo e a mensagem. O whatsmeow manda sozinho os recibos de entrega (os mesmos que o celular já manda) e
+  nenhum recibo de leitura; o serviço não marca como lida nem aparece "online". Fora isso, o login, o logout
+  (`logout`, `wipe`), as reconexões e o download de mídia da CDN do WhatsApp, a outra chamada de saída é o
   pedido de reenvio de mídia ao celular (`POST /v1/media/request`).
 - O log sai em stderr, no formato texto do `slog`. Ele traz os avisos e erros do whatsmeow (`módulo=whatsapp`
   ou `módulo=sessão`) e os eventos de conexão: conectado, queda, sessão aberta em outro cliente,
@@ -109,3 +116,95 @@ outros.
   `connected` nesse meio-tempo.
 - Sai com código 3 quando o `messages.db` é de um esquema mais novo (`schema_newer`): só um binário mais
   novo abre esses dados.
+
+## C5. Envio por rascunho aprovado (api 2)
+
+Quem pede cria um rascunho; a mensagem só sai quando o dono responde `send`. Mesma assinatura e mesmo formato
+de erro das outras rotas. Horários em UTC, `2006-01-02T15:04:05Z`.
+
+| Rota | Sucesso | Erros próprios |
+|---|---|---|
+| `POST /v1/outbox` `{"chat","text","reply_to"?,"file"?,"origin","origin_cwd"?}` | 201 rascunho; 200 com o rascunho pendente igual, sem criar outro | 400 `bad_request`, `file_refused`; 409 `not_paired`, `outdated`, `unknown_chat`, `new_contact`, `unsupported_chat`; 413 `file_too_large`; 429 `too_many_drafts` |
+| `GET /v1/outbox?state=pending` | 200 `{"drafts":[…]}`, os 100 mais novos | 400 sem `state` válido |
+| `GET /v1/outbox/{id}` | 200 rascunho | 404 `not_found` |
+| `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`, `new_contact`, `reachout_locked`; 429 `rate_limited` |
+| `POST /v1/outbox/{id}/decline` | 200 rascunho em `declined` | 404 `not_found`; 409 `expired`, `answered` |
+
+Rascunho:
+
+```json
+{"id","origin","chat","chat_kind":"contact|group","chat_number","chat_name","chat_name_source":"contact|push|group|",
+ "recent":[{"from_me","sender","at","text"}],"text","reply_to","quoted_text",
+ "file":{"name","size","sha256","source","outside_cwd"}|null,
+ "created_at","expires_at","state","via","answered_at","message_id","error","wa_code"}
+```
+
+- `state`: `pending`, `sending`, `sent`, `declined`, `expired`, `failed`. Só `pending` aceita `send` e `decline`;
+  depois disso o rascunho só muda sozinho (`sending` vira `sent` ou `failed`).
+- `chat`: JID ou número com DDI. `unknown_chat`: a conversa não está no arquivo. `new_contact`: a pessoa nunca
+  escreveu para o número pareado agora (nenhuma mensagem com `from_me = 0` desse número). `unsupported_chat`: lista
+  de transmissão e canal. Grupo é aceito.
+- Número de cada mensagem: cada mensagem do arquivo guarda o número pareado que a arquivou ou enviou. Trocar de
+  número, com ou sem volta, não aproveita conversa do outro. O `send` confere de novo a conversa com o número pareado
+  na hora: se ele nunca recebeu mensagem da pessoa, responde `new_contact` e o rascunho fica pendente, mesmo que o
+  rascunho tenha sido feito com outro número. As mensagens de antes da 0.2 ficam com o número pareado na primeira
+  subida da 0.2; despareado nessa hora, com o primeiro número pareado depois. A leitura não muda.
+- `chat_number`: os dígitos do contato; para grupo (e conversa só por `@lid`), o JID inteiro. `chat_name_source`:
+  `contact` (agenda do celular), `push` (nome que a própria pessoa escolheu, ou o da empresa), `group`, ou vazio
+  quando o nome só existe no arquivo, sem origem conhecida.
+- `recent`: as 3 últimas mensagens da conversa, da mais antiga para a mais nova; `sender` é o nome no arquivo
+  ou o número, vazio nas da própria conta.
+- `text`: até 4096 caracteres; vazio só com `file`. Com `file`, o texto vai como legenda do documento, numa
+  mensagem só. `reply_to`: id de mensagem da mesma conversa (senão 400); `quoted_text` é o texto dela.
+- `origin` é `servidor::sessao` de quem pediu, como o Hangar declarou; `via`, quem aprovou. Os dois servem só ao
+  registro.
+- Repetição: já existindo um rascunho pendente com a mesma `origin`, conversa, texto e sha256 do anexo, a
+  criação devolve ele (200).
+- Expira 10 min depois de `created_at`, conferido a cada pedido e a cada 30 s.
+- Tetos: 3 rascunhos pendentes por `origin` e 10 no total (`too_many_drafts`); 3 envios por minuto e 20 em
+  24 h, contando `sending`, `sent` e `failed` pela hora da aprovação (`rate_limited`). A conferência dos tetos
+  e a passagem para `sending` são uma transação só: duas aprovações ao mesmo tempo não passam juntas.
+
+Anexo (`file`):
+
+- Caminho absoluto (senão 400 `bad_request`), arquivo comum de até 100 MB (`file_too_large`).
+- `file_refused` para: a pasta `--data`; qualquer parte do caminho começando por ponto (cobre `~/.hangar`,
+  `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.claude*` e `.env*`), exceto `~/.hangar/worktrees/`, onde o Hangar abre
+  sessões no código do usuário e a regra vale só do que vem abaixo dela (`.git`, `.env`); `*.key` e `*.pem`;
+  `/proc`, `/sys` e `/dev`;
+  link simbólico no último trecho; pasta, FIFO e afins; arquivo que não existe. As regras valem para o caminho
+  pedido e para o caminho com as pastas resolvidas.
+- O arquivo é aberto sem seguir link (`O_NOFOLLOW`; no Windows, aberto como ponto de nova análise, recusado se for
+  link ou junção, e reaberto conferindo que é o mesmo arquivo) e copiado do
+  descritor já conferido para `outbox/<id>/<nome>` (pasta 0700), com sha256. A cópia é o que sai: mudar o original
+  depois não muda o envio. Ela some quando o rascunho chega a estado final; no envio feito, vai para `media/`.
+- `source` é o caminho com as pastas resolvidas. `outside_cwd` é true quando o arquivo não está dentro de
+  `origin_cwd` ou quando `origin_cwd` não veio.
+
+Envio (depois do 202, fora do pedido HTTP; `sending` vira `sent` ou `failed` em no máximo 10 min depois da
+aprovação, o teto que cobre o upload de 100 MB):
+
+1. "digitando" na conversa, espera de `min(1 s + 50 ms por caractere, 6 s)`, "parou de digitar";
+2. upload do anexo, quando há;
+3. a mensagem: texto simples; com `reply_to`, texto com citação (id, autor e conteúdo da mensagem citada); com
+   anexo, documento com nome, tipo, legenda e citação.
+
+O endereço é o da mensagem mais recente da conversa como o WhatsApp a conhece, não a chave normalizada do
+arquivo. No sucesso, `message_id` recebe o id da mensagem e ela entra em `/v1/messages` com `from_me` true.
+Qualquer falha deixa `failed`, sem reenvio. `wa_code` é o código que o WhatsApp devolveu, quando houve.
+`error`:
+- `reachout_locked`: o WhatsApp recusou com 463 ou 475 (trava de contato novo), ou a trava chegou durante o
+  "digitando" e a mensagem não saiu;
+- `unconfirmed`: o envio foi cortado depois de a mensagem talvez ter saído (sem resposta do WhatsApp em 75 s,
+  serviço parando, rede caindo); a pessoa pode ter recebido;
+- `interrupted`: o serviço parou no meio, visto na subida seguinte;
+- senão, o texto do erro.
+
+Trava: quando o WhatsApp avisa a trava de mensagens a contatos novos, o serviço grava o fim dela
+(`reachout_locked_until` no status; aviso sem fim vale 24 h) e recusa `send` com `reachout_locked` até lá. Um 463
+ou 475 também trava por 24 h (ou até o fim já gravado, se for mais tarde): insistir depois dele leva a ban. A
+trava é conferida de novo logo antes da mensagem sair.
+
+Na subida, todo `sending` vira `failed` com `error = "interrupted"` (sem reenvio) e as cópias sem rascunho
+pendente são apagadas. O `wipe` apaga a tabela `outbox` com o `messages.db`, e também `outbox/`: depois dele,
+`GET /v1/outbox/{id}` de um rascunho antigo responde 404 `not_found`.

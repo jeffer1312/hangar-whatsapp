@@ -32,9 +32,16 @@ type env struct {
 
 func newEnv(t *testing.T, paired bool) *env {
 	t.Helper()
+	return newEnvAt(t, paired, func() time.Time { return now })
+}
+
+// newEnvAt gives the service its own clock; signatures keep using now.
+func newEnvAt(t *testing.T, paired bool, svcNow func() time.Time) *env {
+	t.Helper()
 	e := &env{t: t, clients: watest.NewFactory(paired)}
 	svc, err := wa.Open(context.Background(), wa.Options{Dir: t.TempDir(), Version: "0.1.0",
-		Now: func() time.Time { return now }, NewClient: func(d *wastore.Device, l waLog.Logger) wa.Client { return e.clients.New(d, l) }})
+		Now: svcNow, NewClient: func(d *wastore.Device, l waLog.Logger) wa.Client { return e.clients.New(d, l) },
+		Wait: func(context.Context, time.Duration) error { return nil }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,10 +131,10 @@ func TestStatusIsSigned(t *testing.T) {
 	e := newEnv(t, false)
 	r := e.do("GET", "/v1/status", "")
 	m := r.json(t)
-	if r.status != 200 || m["api"] != 1.0 || m["state"] != "unpaired" || m["version"] != "0.1.0" {
+	if r.status != 200 || m["api"] != 2.0 || m["state"] != "unpaired" || m["version"] != "0.1.0" {
 		t.Fatalf("status = %d %s", r.status, r.body)
 	}
-	for _, k := range []string{"error", "device", "device_name", "qr", "qr_expires_at", "pair_code", "pair_code_expires_at", "tz", "totals", "since", "last_message_at"} {
+	for _, k := range []string{"error", "device", "device_name", "qr", "qr_expires_at", "pair_code", "pair_code_expires_at", "tz", "totals", "since", "last_message_at", "send", "reachout_locked_until"} {
 		if _, ok := m[k]; !ok {
 			t.Fatalf("status without %q: %s", k, r.body)
 		}

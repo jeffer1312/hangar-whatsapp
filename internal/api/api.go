@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -40,14 +41,19 @@ func New(svc *wa.Service, key []byte, now func() time.Time, log *slog.Logger) ht
 	s := &server{svc: svc, key: key, now: now, log: log}
 	mux := http.NewServeMux()
 	for pattern, h := range map[string]func(http.ResponseWriter, *http.Request) error{
-		"GET /v1/status":         s.status,
-		"POST /v1/pair":          s.pair,
-		"POST /v1/logout":        s.logout,
-		"POST /v1/wipe":          s.wipe,
-		"GET /v1/chats":          s.chats,
-		"GET /v1/messages":       s.messages,
-		"GET /v1/search":         s.search,
-		"POST /v1/media/request": s.mediaRequest,
+		"GET /v1/status":               s.status,
+		"POST /v1/pair":                s.pair,
+		"POST /v1/logout":              s.logout,
+		"POST /v1/wipe":                s.wipe,
+		"GET /v1/chats":                s.chats,
+		"GET /v1/messages":             s.messages,
+		"GET /v1/search":               s.search,
+		"POST /v1/media/request":       s.mediaRequest,
+		"POST /v1/outbox":              s.createDraft,
+		"GET /v1/outbox":               s.drafts,
+		"GET /v1/outbox/{id}":          s.draft,
+		"POST /v1/outbox/{id}/send":    s.approveDraft,
+		"POST /v1/outbox/{id}/decline": s.declineDraft,
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			if err := h(w, r); err != nil {
@@ -131,8 +137,32 @@ func (s *server) fail(w http.ResponseWriter, err error) {
 	switch {
 	case errors.As(err, &bad):
 		writeError(w, http.StatusBadRequest, "bad_request", string(bad))
-	case errors.Is(err, wa.ErrBadPhone):
+	case errors.Is(err, wa.ErrBadPhone), errors.Is(err, wa.ErrBadDraft):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	case errors.Is(err, wa.ErrFileRefused):
+		writeError(w, http.StatusBadRequest, "file_refused", err.Error())
+	case errors.Is(err, wa.ErrFileTooLarge):
+		writeError(w, http.StatusRequestEntityTooLarge, "file_too_large", err.Error())
+	case errors.Is(err, store.ErrUnknownChat):
+		writeError(w, http.StatusConflict, "unknown_chat", "a conversa não está no arquivo")
+	case errors.Is(err, store.ErrNewContact):
+		writeError(w, http.StatusConflict, "new_contact", "esta pessoa nunca escreveu para você; contato novo não recebe envio")
+	case errors.Is(err, wa.ErrUnsupportedChat):
+		writeError(w, http.StatusConflict, "unsupported_chat", err.Error())
+	case errors.Is(err, store.ErrTooManyDrafts):
+		writeError(w, http.StatusTooManyRequests, "too_many_drafts",
+			fmt.Sprintf("já há rascunhos abertos demais (%d por sessão, %d no total); responda ou espere expirar", store.DraftsPerOrigin, store.DraftsTotal))
+	case errors.Is(err, store.ErrDraftNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err.Error())
+	case errors.Is(err, store.ErrExpired):
+		writeError(w, http.StatusConflict, "expired", err.Error())
+	case errors.Is(err, store.ErrAnswered):
+		writeError(w, http.StatusConflict, "answered", err.Error())
+	case errors.Is(err, wa.ErrReachoutLocked):
+		writeError(w, http.StatusConflict, "reachout_locked", err.Error())
+	case errors.Is(err, store.ErrSendLimit):
+		writeError(w, http.StatusTooManyRequests, "rate_limited",
+			fmt.Sprintf("limite de envios atingido (%d por minuto, %d em 24 h)", store.SendsPerMinute, store.SendsPerDay))
 	case errors.Is(err, store.ErrNotFound):
 		writeError(w, http.StatusBadRequest, "bad_request", "before_id não existe nesta conversa")
 	case errors.Is(err, wa.ErrAlreadyPaired):
@@ -342,5 +372,76 @@ func (s *server) mediaRequest(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	writeJSON(w, http.StatusOK, res)
+	return nil
+}
+
+func (s *server) createDraft(w http.ResponseWriter, r *http.Request) error {
+	var in struct {
+		Chat      string `json:"chat"`
+		Text      string `json:"text"`
+		ReplyTo   string `json:"reply_to"`
+		File      string `json:"file"`
+		Origin    string `json:"origin"`
+		OriginCwd string `json:"origin_cwd"`
+	}
+	if err := decode(r, &in); err != nil {
+		return err
+	}
+	chat, err := chatJID(in.Chat)
+	if err != nil {
+		return err
+	}
+	d, created, err := s.svc.CreateDraft(r.Context(), wa.DraftRequest{Origin: in.Origin, OriginCwd: in.OriginCwd, Chat: chat,
+		Text: in.Text, ReplyTo: in.ReplyTo, File: in.File})
+	if err != nil {
+		return err
+	}
+	status := http.StatusOK
+	if created {
+		status = http.StatusCreated
+	}
+	writeJSON(w, status, d)
+	return nil
+}
+
+func (s *server) drafts(w http.ResponseWriter, r *http.Request) error {
+	list, err := s.svc.Drafts(r.Context(), r.URL.Query().Get("state"))
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"drafts": list})
+	return nil
+}
+
+func (s *server) draft(w http.ResponseWriter, r *http.Request) error {
+	d, err := s.svc.Draft(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, d)
+	return nil
+}
+
+func (s *server) approveDraft(w http.ResponseWriter, r *http.Request) error {
+	var in struct {
+		Via string `json:"via"`
+	}
+	if err := decode(r, &in); err != nil {
+		return err
+	}
+	d, err := s.svc.ApproveDraft(r.Context(), r.PathValue("id"), in.Via)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusAccepted, d)
+	return nil
+}
+
+func (s *server) declineDraft(w http.ResponseWriter, r *http.Request) error {
+	d, err := s.svc.DeclineDraft(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusOK, d)
 	return nil
 }

@@ -18,7 +18,7 @@ import (
 //go:embed schema.sql
 var schema string
 
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // TimeLayout is UTC with Z; every stored time uses it so text order is time order.
 const TimeLayout = "2006-01-02T15:04:05Z"
@@ -42,7 +42,8 @@ func MessagesPath(dir string) string { return filepath.Join(dir, "messages.db") 
 // OpenSQLite opens a writer: one connection, because SQLite has one writer at a time.
 func OpenSQLite(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", "file:"+path+
-		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"+
+		"&_txlock=immediate")
 	if err != nil {
 		return nil, err
 	}
@@ -95,6 +96,17 @@ func migrate(w *sql.DB) error {
 	}
 	if v > SchemaVersion {
 		return fmt.Errorf("%w: messages.db is version %d, this binary knows up to %d", ErrSchemaNewer, v, SchemaVersion)
+	}
+	// A version 1 messages table predates account; the schema's index on it needs the column first.
+	var table, account bool
+	if err := w.QueryRow(`SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'),
+		EXISTS (SELECT 1 FROM pragma_table_info('messages') WHERE name = 'account')`).Scan(&table, &account); err != nil {
+		return err
+	}
+	if table && !account {
+		if _, err := w.Exec(`ALTER TABLE messages ADD COLUMN account TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add messages.account: %w", err)
+		}
 	}
 	if _, err := w.Exec(schema); err != nil {
 		return fmt.Errorf("create tables: %w", err)
