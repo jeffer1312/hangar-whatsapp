@@ -932,6 +932,7 @@ func TestEditedTextIsCheckedLikeANewDraft(t *testing.T) {
 	if _, err := h.svc.ApproveEditedDraft(context.Background(), d.ID, "desktop", ok); err != nil {
 		t.Fatalf("4096 characters after normalizing = %v", err)
 	}
+	h.waitState(d.ID, "sent")
 
 	zip := writeFile(t, filepath.Join(t.TempDir(), "a.zip"), "PK")
 	f := h.mustDraft(DraftRequest{Chat: chatA, Text: "segue", File: zip, Origin: "notebook::s2"})

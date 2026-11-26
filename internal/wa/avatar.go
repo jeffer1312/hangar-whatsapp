@@ -75,6 +75,10 @@ func (s *Service) download(ctx context.Context, raw string) ([]byte, error) {
 	if err != nil || cfg.Width > maxAvatarSide || cfg.Height > maxAvatarSide {
 		return nil, fmt.Errorf("%w: JPEG ilegível ou acima de %d px", errAvatarRefused, maxAvatarSide)
 	}
+	// The headers alone do not prove the image data is whole.
+	if _, err := jpeg.Decode(bytes.NewReader(b)); err != nil {
+		return nil, fmt.Errorf("%w: JPEG incompleto: %w", errAvatarRefused, err)
+	}
 	return b, nil
 }
 

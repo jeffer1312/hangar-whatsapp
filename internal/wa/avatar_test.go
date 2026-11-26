@@ -121,6 +121,24 @@ func jpegOf(t *testing.T, w, h int) []byte {
 	return b.Bytes()
 }
 
+// cutScan is a JPEG whose headers are whole but whose image data stops halfway.
+func cutScan(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewGray(image.Rect(0, 0, 64, 64))
+	for i := range img.Pix {
+		img.Pix[i] = byte(i * 37)
+	}
+	var b bytes.Buffer
+	if err := jpeg.Encode(&b, img, nil); err != nil {
+		t.Fatal(err)
+	}
+	sos := bytes.Index(b.Bytes(), []byte{0xFF, 0xDA})
+	if sos < 0 || sos+40 >= b.Len() {
+		t.Fatalf("JPEG without enough image data: %d bytes, scan at %d", b.Len(), sos)
+	}
+	return b.Bytes()[:sos+40]
+}
+
 func picture(id, url string) watest.PictureAnswer {
 	return func(ctx context.Context, jid types.JID, p whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {
 		return &types.ProfilePictureInfo{ID: id, URL: url, Type: "preview"}, nil
@@ -261,6 +279,7 @@ func TestChatPictureDownloadIsChecked(t *testing.T) {
 		{"above 24 KB", picURL, append(append([]byte(nil), small...), make([]byte, 24<<10)...), 1},
 		{"not a JPEG", picURL, png, 1},
 		{"above 640 px", picURL, jpegOf(t, 641, 8), 1},
+		{"cut in the image data", picURL, cutScan(t), 1},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			h := newAvatarHarness(t)
