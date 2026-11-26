@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -47,37 +48,6 @@ func TestOpenStampsSchemaVersion(t *testing.T) {
 	}
 }
 
-func TestOpenMigratesVersion1(t *testing.T) {
-	dir := t.TempDir()
-	db, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, q := range []string{
-		`INSERT INTO messages (chat, id, from_me, at, kind, source) VALUES ('5564@s.whatsapp.net', 'M1', 0, '2026-11-22T10:00:00Z', 'text', 'whatsapp')`,
-		`DROP TABLE IF EXISTS outbox`, `DROP TABLE IF EXISTS settings`, `PRAGMA user_version = 1`,
-	} {
-		if _, err := db.w.Exec(q); err != nil {
-			t.Fatal(err)
-		}
-	}
-	db.Close()
-
-	db, err = Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	var v, outbox, messages int
-	if err := db.w.QueryRow(`SELECT (SELECT user_version FROM pragma_user_version),
-			(SELECT count(*) FROM sqlite_master WHERE name = 'outbox'), (SELECT count(*) FROM messages)`).Scan(&v, &outbox, &messages); err != nil {
-		t.Fatal(err)
-	}
-	if v != 2 || outbox != 1 || messages != 1 {
-		t.Fatalf("after migrating = version %d, outbox tables %d, messages %d; want 2, 1, 1", v, outbox, messages)
-	}
-}
-
 // version1 leaves in dir a messages.db at user_version 1 with one message and no outbox.
 func version1(t *testing.T, dir string) {
 	t.Helper()
@@ -111,22 +81,10 @@ func inspect(t *testing.T, path string) (version, outbox, messages int) {
 	return
 }
 
-func TestBackupBeforeRaisingVersion(t *testing.T) {
+func TestOpenMigratesVersion1AfterCopyingIt(t *testing.T) {
 	dir := t.TempDir()
-	version1(t, dir)
-	db, err := Open(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	if v, outbox, messages := inspect(t, filepath.Join(dir, "messages.db.schema1.bak")); v != 1 || outbox != 0 || messages != 1 {
-		t.Fatalf("backup = version %d, outbox tables %d, messages %d; want 1, 0, 1", v, outbox, messages)
-	}
-}
-
-func TestBackupOverwritesTheOldOne(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "messages.db.schema1.bak"), []byte("old"), 0o600); err != nil {
+	bak := filepath.Join(dir, "messages.db.schema1.bak")
+	if err := os.WriteFile(bak, []byte("old"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	version1(t, dir)
@@ -135,8 +93,14 @@ func TestBackupOverwritesTheOldOne(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	if v, _, messages := inspect(t, filepath.Join(dir, "messages.db.schema1.bak")); v != 1 || messages != 1 {
-		t.Fatalf("backup = version %d, messages %d; want 1, 1", v, messages)
+	if v, outbox, messages := inspect(t, MessagesPath(dir)); v != 2 || outbox != 1 || messages != 1 {
+		t.Fatalf("after migrating = version %d, outbox tables %d, messages %d; want 2, 1, 1", v, outbox, messages)
+	}
+	if v, outbox, messages := inspect(t, bak); v != 1 || outbox != 0 || messages != 1 {
+		t.Fatalf("copy = version %d, outbox tables %d, messages %d; want 1, 0, 1", v, outbox, messages)
+	}
+	if fi, err := os.Stat(bak); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
+		t.Fatalf("copy mode = %v, %v; want 0600", fi.Mode().Perm(), err)
 	}
 }
 
@@ -170,6 +134,9 @@ func TestBackupFailureLeavesTheDatabaseAlone(t *testing.T) {
 	}
 	if v, outbox, messages := inspect(t, MessagesPath(dir)); v != 1 || outbox != 0 || messages != 1 {
 		t.Fatalf("after the failed backup = version %d, outbox tables %d, messages %d; want 1, 0, 1", v, outbox, messages)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "messages.db.schema1.bak.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("the failed copy left its temporary file: %v", err)
 	}
 }
 

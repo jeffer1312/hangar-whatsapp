@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -77,7 +78,7 @@ func Open(dir string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := migrate(w, MessagesPath(dir)); err != nil {
+	if err := migrate(w, dir); err != nil {
 		w.Close()
 		return nil, err
 	}
@@ -91,7 +92,7 @@ func Open(dir string) (*DB, error) {
 	return &DB{w: w, r: r, dir: dir, QueryTimeout: defaultQueryTimeout}, nil
 }
 
-func migrate(w *sql.DB, path string) error {
+func migrate(w *sql.DB, dir string) error {
 	var v int
 	if err := w.QueryRow(`PRAGMA user_version`).Scan(&v); err != nil {
 		return err
@@ -100,7 +101,7 @@ func migrate(w *sql.DB, path string) error {
 		return fmt.Errorf("%w: messages.db is version %d, this binary knows up to %d", ErrSchemaNewer, v, SchemaVersion)
 	}
 	if v > 0 && v < SchemaVersion {
-		if err := backup(w, path, v); err != nil {
+		if err := backup(w, dir, v); err != nil {
 			return fmt.Errorf("%w: copy of messages.db at version %d: %w", ErrBackupFailed, v, err)
 		}
 	}
@@ -124,19 +125,51 @@ func migrate(w *sql.DB, path string) error {
 	return err
 }
 
-// backup writes <path>.schema<v>.bak before the version goes up, for the supervisor to put back if
+// backupPrefix starts the name of every copy backup writes next to messages.db.
+const backupPrefix = "messages.db.schema"
+
+// backup writes messages.db.schema<v>.bak before the version goes up, for the supervisor to put back if
 // the new binary does not stay up. It goes through a temporary name so a .bak on disk is always whole.
-func backup(w *sql.DB, path string, v int) error {
-	bak := fmt.Sprintf("%s.schema%d.bak", path, v)
+func backup(w *sql.DB, dir string, v int) (err error) {
+	bak := filepath.Join(dir, fmt.Sprintf("%s%d.bak", backupPrefix, v))
 	tmp := bak + ".tmp"
 	if err := os.Remove(tmp); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
+	defer func() {
+		if err != nil {
+			os.Remove(tmp)
+		}
+	}()
 	if _, err := w.Exec(`VACUUM INTO ?`, tmp); err != nil {
-		os.Remove(tmp)
+		return err
+	}
+	// It holds every message: owner only, like messages.db's folder.
+	if err := os.Chmod(tmp, 0o600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, bak)
+}
+
+// RemoveBackups deletes the copies backup leaves in dir, finished or not.
+func RemoveBackups(dir string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	var errs []error
+	for _, e := range entries {
+		name := e.Name()
+		if strings.HasPrefix(name, backupPrefix) && (strings.HasSuffix(name, ".bak") || strings.HasSuffix(name, ".bak.tmp")) {
+			if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				errs = append(errs, err)
+			}
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // addColumn adds a column to a table that exists without it.

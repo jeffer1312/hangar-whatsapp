@@ -247,6 +247,24 @@ func TestWipeClosesAndDeletesThenStartsFresh(t *testing.T) {
 	}
 }
 
+func TestWipeDeletesTheMigrationCopies(t *testing.T) {
+	h := newHarness(t, true)
+	copies := []string{"messages.db.schema1.bak", "messages.db.schema1.bak.tmp"}
+	for _, name := range copies {
+		if err := os.WriteFile(filepath.Join(h.dir, name), []byte("old messages"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := h.svc.Wipe(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range copies {
+		if _, err := os.Stat(filepath.Join(h.dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s still there after wipe: %v", name, err)
+		}
+	}
+}
+
 func TestWipeSaysWhenThePhoneStillListsTheDevice(t *testing.T) {
 	h := newHarness(t, true)
 	h.client().FailLogout(errors.New("phone offline"))

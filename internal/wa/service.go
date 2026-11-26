@@ -572,6 +572,7 @@ func (s *Service) Wipe(ctx context.Context) (string, error) {
 	// behind is reported.
 	errs := []error{
 		store.RemoveDB(store.MessagesPath(s.opt.Dir)),
+		store.RemoveBackups(s.opt.Dir),
 		store.RemoveDB(store.SessionPath(s.opt.Dir)),
 		os.RemoveAll(filepath.Join(s.opt.Dir, "media")),
 		os.RemoveAll(outboxDir(s.opt.Dir)),

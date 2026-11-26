@@ -25,6 +25,7 @@ mesma release: não protege contra uma release comprometida.
 ```sh
 hangar-whatsapp [--data ~/.hangar/whatsapp]   # serviço: API em 127.0.0.1, porta em control.json
 hangar-whatsapp --version
+hangar-whatsapp --schema-version                # versão do esquema do messages.db, sem abrir os dados
 hangar-whatsapp --data ~/.hangar/whatsapp --import ~/Projetos/whatsapp-arquivo/dados
 ```
 
@@ -41,6 +42,7 @@ reconecta sozinho; essa detecção depende do texto do aviso do whatsmeow (ver [
 | Arquivo | O que é |
 |---|---|
 | `messages.db` | SQLite: `messages`, `contacts`, `media_requests`, `outbox` (rascunhos e o que saiu), `settings` e a visão `chats` |
+| `messages.db.schema<v>.bak` | cópia do `messages.db` feita antes de migrar do esquema `v` (ver [docs/api.md](docs/api.md)); sai junto no wipe |
 | `session.db` | chaves do aparelho (whatsmeow); fica travado enquanto o serviço roda |
 | `media/` | arquivos de mídia, `media/<número>/<id>.<ext>` |
 | `outbox/` | cópia do anexo de cada rascunho aberto, `outbox/<id>/<nome>` |
