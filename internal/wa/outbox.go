@@ -305,6 +305,10 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		if err != nil {
 			return store.Draft{}, err
 		}
+		// The number paired now sends, maybe not the one the draft was made under.
+		if _, err := in.db.OutboxChat(ctx, d.Chat, accountOf(cli)); err != nil {
+			return store.Draft{}, err
+		}
 		if err := s.checkReachout(ctx, in); err != nil {
 			return store.Draft{}, err
 		}

@@ -127,7 +127,7 @@ de erro das outras rotas. Horários em UTC, `2006-01-02T15:04:05Z`.
 | `POST /v1/outbox` `{"chat","text","reply_to"?,"file"?,"origin","origin_cwd"?}` | 201 rascunho; 200 com o rascunho pendente igual, sem criar outro | 400 `bad_request`, `file_refused`; 409 `not_paired`, `outdated`, `unknown_chat`, `new_contact`, `unsupported_chat`; 413 `file_too_large`; 429 `too_many_drafts` |
 | `GET /v1/outbox?state=pending` | 200 `{"drafts":[…]}`, os 100 mais novos | 400 sem `state` válido |
 | `GET /v1/outbox/{id}` | 200 rascunho | 404 `not_found` |
-| `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`, `reachout_locked`; 429 `rate_limited` |
+| `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`, `new_contact`, `reachout_locked`; 429 `rate_limited` |
 | `POST /v1/outbox/{id}/decline` | 200 rascunho em `declined` | 404 `not_found`; 409 `expired`, `answered` |
 
 Rascunho:
@@ -145,7 +145,8 @@ Rascunho:
   escreveu para o número pareado agora (nenhuma mensagem com `from_me = 0` desse número). `unsupported_chat`: lista
   de transmissão e canal. Grupo é aceito.
 - Número de cada mensagem: cada mensagem do arquivo guarda o número pareado que a arquivou ou enviou. Trocar de
-  número, com ou sem volta, não aproveita conversa do outro. As mensagens de antes da 0.2 ficam com o número pareado
+  número, com ou sem volta, não aproveita conversa do outro; o `send` confere de novo com o número pareado na hora
+  (rascunho feito com outro número responde `new_contact` e fica pendente). As mensagens de antes da 0.2 ficam com o número pareado
   na primeira subida da 0.2; despareado nessa hora, com o primeiro número pareado depois. A leitura não muda.
 - `chat_number`: os dígitos do contato; para grupo (e conversa só por `@lid`), o JID inteiro. `chat_name_source`:
   `contact` (agenda do celular), `push` (nome que a própria pessoa escolheu, ou o da empresa), `group`, ou vazio

@@ -869,3 +869,27 @@ func TestMigratedMessagesCountForTheNumberPairedAtUpgrade(t *testing.T) {
 		t.Fatalf("draft to a chat of the 0.1.x archive = %+v, %v; want it allowed for the paired number", d, err)
 	}
 }
+
+func TestApprovalRechecksNewContactForTheSendingNumber(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "oi"})
+	// Before it expires, another number is paired: the person never wrote to it.
+	db, err := sql.Open("sqlite", "file:"+store.MessagesPath(h.dir)+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`UPDATE messages SET account = '5511988887777'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.svc.ApproveDraft(context.Background(), d.ID, "desktop"); !errors.Is(err, store.ErrNewContact) {
+		t.Fatalf("ApproveDraft for a chat the paired number never heard from = %v, want ErrNewContact", err)
+	}
+	if got, _ := h.svc.Draft(context.Background(), d.ID); got.State != "pending" {
+		t.Fatalf("draft after the refusal = %s, want pending", got.State)
+	}
+	if n := len(h.client().Sent()); n != 0 {
+		t.Fatalf("SendMessage called %d times", n)
+	}
+}
