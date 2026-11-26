@@ -52,6 +52,8 @@ type Recent struct {
 	Sender string `json:"sender"`
 	At     string `json:"at"`
 	Text   string `json:"text"`
+	Kind     string `json:"kind,omitempty"`
+	FileName string `json:"file_name"`
 }
 
 type Draft struct {
@@ -75,6 +77,8 @@ type Draft struct {
 	MessageID      *string    `json:"message_id"`
 	Error          *string    `json:"error"`
 	WACode         *int       `json:"wa_code"`
+	// The cached picture of the chat as the paired number sees it, read on every read of the draft.
+	ChatAvatar []byte `json:"chat_avatar"`
 	// Address is where the message goes; QuotedRaw is the raw column of the quoted message.
 	Address   string `json:"-"`
 	QuotedRaw string `json:"-"`
@@ -399,9 +403,11 @@ func (d *DB) OutboxChat(ctx context.Context, chat, account string) (ChatInfo, er
 			return ErrNewContact
 		}
 		info.Address = address.String
-		rows, err := d.r.QueryContext(ctx, `SELECT m.from_me, m.sender, coalesce(s.name, ''), m.at, m.text
+		rows, err := d.r.QueryContext(ctx, `SELECT m.from_me, m.sender, coalesce(s.name, ''), m.at, m.text, m.kind,
+				iif(m.kind = 'document' AND json_valid(m.raw),
+					substr(coalesce(json_extract(m.raw, '$.message.documentMessage.fileName'), ''), 1, 120), '')
 			FROM messages m LEFT JOIN contacts s ON s.jid = m.sender
-			WHERE m.chat = ? ORDER BY m.at DESC, m.id DESC LIMIT 3`, chat)
+			WHERE m.chat = ? AND m.kind <> 'reaction' ORDER BY m.at DESC, m.id DESC LIMIT 3`, chat)
 		if err != nil {
 			return err
 		}
@@ -410,7 +416,7 @@ func (d *DB) OutboxChat(ctx context.Context, chat, account string) (ChatInfo, er
 		for rows.Next() {
 			var r Recent
 			var sender, name string
-			if err := rows.Scan(&r.FromMe, &sender, &name, &r.At, &r.Text); err != nil {
+			if err := rows.Scan(&r.FromMe, &sender, &name, &r.At, &r.Text, &r.Kind, &r.FileName); err != nil {
 				return err
 			}
 			if !r.FromMe {

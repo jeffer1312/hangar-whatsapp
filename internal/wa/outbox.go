@@ -133,7 +133,13 @@ func (s *Service) createDraft(ctx context.Context, in *instance, req DraftReques
 	if d.File != nil && (err != nil || !created) {
 		os.RemoveAll(copyDir)
 	}
-	return got, created, err
+	if err != nil {
+		return got, created, err
+	}
+	if created {
+		s.fetchAvatar(in, cli, got.Chat)
+	}
+	return s.withAvatar(ctx, in, got), created, nil
 }
 
 // contactName prefers the phone's address book ("contact") to the name people give themselves
@@ -248,7 +254,11 @@ func (s *Service) Draft(ctx context.Context, id string) (store.Draft, error) {
 		if err := s.expire(ctx, in); err != nil {
 			return store.Draft{}, err
 		}
-		return in.db.Draft(ctx, id)
+		d, err := in.db.Draft(ctx, id)
+		if err != nil {
+			return d, err
+		}
+		return s.withAvatar(ctx, in, d), nil
 	})
 }
 
@@ -263,7 +273,11 @@ func (s *Service) Drafts(ctx context.Context, state string) ([]store.Draft, erro
 		if err := s.expire(ctx, in); err != nil {
 			return nil, err
 		}
-		return in.db.Drafts(ctx, state)
+		list, err := in.db.Drafts(ctx, state)
+		for i := range list {
+			list[i] = s.withAvatar(ctx, in, list[i])
+		}
+		return list, err
 	})
 }
 
@@ -316,10 +330,11 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		if errors.Is(err, store.ErrExpired) {
 			s.sweep(ctx, in, false)
 		}
-		if err == nil {
-			in.wg.Go(func() { s.deliver(in, cli, d) })
+		if err != nil {
+			return d, err
 		}
-		return d, err
+		in.wg.Go(func() { s.deliver(in, cli, d) })
+		return s.withAvatar(ctx, in, d), nil
 	})
 }
 
@@ -327,7 +342,10 @@ func (s *Service) DeclineDraft(ctx context.Context, id string) (store.Draft, err
 	return with(s, func(in *instance) (store.Draft, error) {
 		d, err := in.db.Decline(ctx, id, s.now())
 		s.sweep(ctx, in, false)
-		return d, err
+		if err != nil {
+			return d, err
+		}
+		return s.withAvatar(ctx, in, d), nil
 	})
 }
 

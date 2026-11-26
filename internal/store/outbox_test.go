@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -344,5 +345,34 @@ func TestMarkSentWithoutTheArchive(t *testing.T) {
 	}
 	if n, _ := db.InterruptSending(ctx); n != 0 {
 		t.Fatalf("a sent draft was interrupted on restart")
+	}
+}
+
+func TestOutboxChatRecentHasTheKindWithoutReactions(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	long := strings.Repeat("n", 130) + ".pdf"
+	insert(t, db, chatA, "M1", "2026-11-24T10:00:00Z", "text", "oi")
+	exec(t, db, `INSERT INTO messages (chat, id, sender, from_me, at, kind, text, source, raw, account)
+		VALUES (?, 'M2', ?, 0, '2026-11-24T10:01:00Z', 'document', 'contrato.pdf', 'whatsapp', ?, ?)`,
+		chatA, chatA, `{"chat":"`+chatA+`","message":{"documentMessage":{"fileName":"contrato.pdf"}}}`, accountA)
+	exec(t, db, `INSERT INTO messages (chat, id, sender, from_me, at, kind, text, source, raw)
+		VALUES (?, 'M3', '', 1, '2026-11-24T10:02:00Z', 'document', '', 'whatsapp', ?)`,
+		chatA, `{"message":{"documentMessage":{"fileName":"`+long+`"}}}`)
+	insert(t, db, chatA, "M4", "2026-11-24T10:03:00Z", "image", "")
+	insert(t, db, chatA, "M5", "2026-11-24T10:04:00Z", "reaction", "👍")
+	exec(t, db, `UPDATE messages SET account = ? WHERE from_me = 0`, accountA)
+
+	info, err := db.OutboxChat(ctx, chatA, accountA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, r := range info.Recent {
+		got = append(got, r.Kind+"|"+r.FileName)
+	}
+	want := []string{"document|contrato.pdf", "document|" + long[:120], "image|"}
+	if !equal(got, want) {
+		t.Fatalf("recent = %v\nwant %v", got, want)
 	}
 }

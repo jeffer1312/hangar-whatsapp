@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -74,6 +75,8 @@ type Options struct {
 	Log       *slog.Logger
 	// Wait holds the typing indicator before a send; tests skip it.
 	Wait func(ctx context.Context, d time.Duration) error
+	// AvatarTransport downloads contact pictures; nil is the network.
+	AvatarTransport http.RoundTripper
 }
 
 type StatusError struct {
@@ -116,12 +119,16 @@ type instance struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
+
+	avatarMu   sync.Mutex
+	avatarBusy map[string]bool
 }
 
 type Service struct {
-	opt  Options
-	root context.Context
-	tz   string
+	opt     Options
+	root    context.Context
+	tz      string
+	avatars *http.Client
 
 	// rw guards in: readers hold it shared, wipe and close hold it alone.
 	rw sync.RWMutex
@@ -168,7 +175,7 @@ func Open(ctx context.Context, opt Options) (*Service, error) {
 	wastore.DeviceProps.RequireFullSync = proto.Bool(true)
 	wastore.DeviceProps.PlatformType = waCompanionReg.DeviceProps_CHROME.Enum()
 	wastore.DeviceProps.Os = proto.String("Linux")
-	s := &Service{opt: opt, root: ctx, tz: machineTZ(), reactivateBase: time.Minute}
+	s := &Service{opt: opt, root: ctx, tz: machineTZ(), reactivateBase: time.Minute, avatars: newAvatarClient(opt.AvatarTransport)}
 	if err := s.start(); err != nil {
 		return nil, err
 	}
@@ -204,7 +211,7 @@ func (s *Service) start() (err error) {
 	if err != nil {
 		return err
 	}
-	in := &instance{db: db, container: container}
+	in := &instance{db: db, container: container, avatarBusy: map[string]bool{}}
 	in.ctx, in.cancel = context.WithCancel(s.root)
 	// Before any worker starts: a draft left sending would otherwise stay so with nobody to finish it.
 	if err := s.recoverOutbox(in); err != nil {

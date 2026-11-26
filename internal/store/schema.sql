@@ -88,6 +88,24 @@ CREATE INDEX IF NOT EXISTS outbox_state ON outbox (state, created_at);
 -- The send caps count what left pending to be sent, by when it was approved.
 CREATE INDEX IF NOT EXISTS outbox_sends ON outbox (answered_at) WHERE state IN ('sending', 'sent', 'failed');
 
+-- Contact and group pictures, fetched after a draft is made for the chat. account is the number paired
+-- at the time: a hidden picture depends on who asks.
+CREATE TABLE IF NOT EXISTS avatars (
+	account TEXT NOT NULL,
+	jid TEXT NOT NULL,
+	picture_id TEXT NOT NULL DEFAULT '',
+	-- ok, none, hidden
+	state TEXT NOT NULL,
+	image BLOB,
+	fetched_at TEXT NOT NULL,
+	PRIMARY KEY (account, jid)
+);
+
+-- One row per picture query in the last 24 h, for the daily cap.
+CREATE TABLE IF NOT EXISTS avatar_fetches (
+	at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL

@@ -40,6 +40,40 @@ type Client struct {
 	sent                             []Sent
 	presences                        []string
 	uploads                          [][]byte
+	picture                          PictureAnswer
+	pictureQueries                   []PictureQuery
+}
+
+// PictureAnswer stands for WhatsApp's answer to a profile picture query.
+type PictureAnswer func(ctx context.Context, jid types.JID, params whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
+
+type PictureQuery struct {
+	JID    types.JID
+	Params whatsmeow.GetProfilePictureParams
+}
+
+// AnswerPicture sets the answer to the next picture queries; without it, nobody has a picture.
+func (f *Client) AnswerPicture(fn PictureAnswer) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.picture = fn
+}
+
+func (f *Client) GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error) {
+	f.mu.Lock()
+	f.pictureQueries = append(f.pictureQueries, PictureQuery{JID: jid, Params: *params})
+	fn := f.picture
+	f.mu.Unlock()
+	if fn == nil {
+		return nil, whatsmeow.ErrProfilePictureNotSet
+	}
+	return fn(ctx, jid, *params)
+}
+
+func (f *Client) PictureQueries() []PictureQuery {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]PictureQuery(nil), f.pictureQueries...)
 }
 
 // Sent is a message handed to SendMessage; nothing leaves the test.
