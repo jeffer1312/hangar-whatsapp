@@ -145,9 +145,10 @@ Rascunho:
   escreveu para o número pareado agora (nenhuma mensagem com `from_me = 0` desse número). `unsupported_chat`: lista
   de transmissão e canal. Grupo é aceito.
 - Número de cada mensagem: cada mensagem do arquivo guarda o número pareado que a arquivou ou enviou. Trocar de
-  número, com ou sem volta, não aproveita conversa do outro; o `send` confere de novo com o número pareado na hora
-  (rascunho feito com outro número responde `new_contact` e fica pendente). As mensagens de antes da 0.2 ficam com o número pareado
-  na primeira subida da 0.2; despareado nessa hora, com o primeiro número pareado depois. A leitura não muda.
+  número, com ou sem volta, não aproveita conversa do outro. O `send` confere de novo a conversa com o número pareado
+  na hora: se ele nunca recebeu mensagem da pessoa, responde `new_contact` e o rascunho fica pendente, mesmo que o
+  rascunho tenha sido feito com outro número. As mensagens de antes da 0.2 ficam com o número pareado na primeira
+  subida da 0.2; despareado nessa hora, com o primeiro número pareado depois. A leitura não muda.
 - `chat_number`: os dígitos do contato; para grupo (e conversa só por `@lid`), o JID inteiro. `chat_name_source`:
   `contact` (agenda do celular), `push` (nome que a própria pessoa escolheu, ou o da empresa), `group`, ou vazio
   quando o nome só existe no arquivo, sem origem conhecida.
