@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 var t0 = time.Date(2026, 11, 24, 12, 0, 0, 0, time.UTC)
+
+func ptr(s string) *string { return &s }
 
 func openDB(t *testing.T) *DB {
 	t.Helper()
@@ -86,21 +89,21 @@ func TestClaimSend(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 	create(t, db, draft("C1", "srv::s1", "oi"), t0)
-	got, err := db.ClaimSend(ctx, "C1", "desktop", t0.Add(time.Minute))
+	got, err := db.ClaimSend(ctx, "C1", "desktop", nil, t0.Add(time.Minute))
 	if err != nil || got.State != "sending" || got.Via == nil || *got.Via != "desktop" || got.AnsweredAt == nil || *got.AnsweredAt != "2026-11-24T12:01:00Z" {
 		t.Fatalf("ClaimSend = %+v, %v", got, err)
 	}
-	if _, err := db.ClaimSend(ctx, "C1", "mobile", t0.Add(time.Minute)); !errors.Is(err, ErrAnswered) {
+	if _, err := db.ClaimSend(ctx, "C1", "mobile", nil, t0.Add(time.Minute)); !errors.Is(err, ErrAnswered) {
 		t.Fatalf("second send = %v, want ErrAnswered", err)
 	}
 	if _, err := db.Decline(ctx, "C1", t0.Add(time.Minute)); !errors.Is(err, ErrAnswered) {
 		t.Fatalf("decline after send = %v, want ErrAnswered", err)
 	}
-	if _, err := db.ClaimSend(ctx, "NOPE", "desktop", t0); !errors.Is(err, ErrDraftNotFound) {
+	if _, err := db.ClaimSend(ctx, "NOPE", "desktop", nil, t0); !errors.Is(err, ErrDraftNotFound) {
 		t.Fatalf("unknown id = %v, want ErrDraftNotFound", err)
 	}
 	create(t, db, draft("C2", "srv::s1", "tarde"), t0)
-	if _, err := db.ClaimSend(ctx, "C2", "desktop", t0.Add(10*time.Minute)); !errors.Is(err, ErrExpired) {
+	if _, err := db.ClaimSend(ctx, "C2", "desktop", nil, t0.Add(10*time.Minute)); !errors.Is(err, ErrExpired) {
 		t.Fatalf("send at expiry = %v, want ErrExpired", err)
 	}
 	if d, err := db.Draft(ctx, "C2"); err != nil || d.State != "expired" {
@@ -115,17 +118,17 @@ func TestClaimSendCaps(t *testing.T) {
 		create(t, db, draft(fmt.Sprintf("M%d", i), fmt.Sprintf("srv::s%d", i), "x"), t0)
 	}
 	for i := range 3 {
-		if _, err := db.ClaimSend(ctx, fmt.Sprintf("M%d", i), "desktop", t0.Add(time.Duration(i)*time.Second)); err != nil {
+		if _, err := db.ClaimSend(ctx, fmt.Sprintf("M%d", i), "desktop", nil, t0.Add(time.Duration(i)*time.Second)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if _, err := db.ClaimSend(ctx, "M3", "desktop", t0.Add(59*time.Second)); !errors.Is(err, ErrSendLimit) {
+	if _, err := db.ClaimSend(ctx, "M3", "desktop", nil, t0.Add(59*time.Second)); !errors.Is(err, ErrSendLimit) {
 		t.Fatalf("fourth send in a minute = %v, want ErrSendLimit", err)
 	}
 	if d, _ := db.Draft(ctx, "M3"); d.State != "pending" {
 		t.Fatalf("refused send changed the draft to %s", d.State)
 	}
-	if _, err := db.ClaimSend(ctx, "M3", "desktop", t0.Add(61*time.Second)); err != nil {
+	if _, err := db.ClaimSend(ctx, "M3", "desktop", nil, t0.Add(61*time.Second)); err != nil {
 		t.Fatalf("send after the minute = %v", err)
 	}
 	if minute, day, err := db.CountSends(ctx, t0.Add(61*time.Second)); err != nil || minute != 2 || day != 4 {
@@ -148,7 +151,7 @@ func TestClaimSendCaps(t *testing.T) {
 		chatA, chatA, "2026-11-24T01:00:00Z", "2026-11-24T01:10:00Z", "2026-11-24T01:00:00Z"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ClaimSend(ctx, "M4", "desktop", t0.Add(5*time.Minute)); !errors.Is(err, ErrSendLimit) {
+	if _, err := db.ClaimSend(ctx, "M4", "desktop", nil, t0.Add(5*time.Minute)); !errors.Is(err, ErrSendLimit) {
 		t.Fatalf("21st send in 24 h = %v, want ErrSendLimit", err)
 	}
 }
@@ -160,7 +163,7 @@ func TestClaimSendRace(t *testing.T) {
 	results := make(chan error, 8)
 	for range 8 {
 		wg.Go(func() {
-			_, err := db.ClaimSend(context.Background(), "R1", "desktop", t0)
+			_, err := db.ClaimSend(context.Background(), "R1", "desktop", nil, t0)
 			results <- err
 		})
 	}
@@ -205,7 +208,7 @@ func TestFinishAndInterrupt(t *testing.T) {
 	ctx := context.Background()
 	for _, id := range []string{"F1", "F2", "F3"} {
 		create(t, db, draft(id, "srv::"+id, "oi"), t0)
-		if _, err := db.ClaimSend(ctx, id, "mobile", t0); err != nil {
+		if _, err := db.ClaimSend(ctx, id, "mobile", nil, t0); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -333,7 +336,7 @@ func TestMarkSentWithoutTheArchive(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
 	create(t, db, draft("K1", "srv::s1", "oi"), t0)
-	if _, err := db.ClaimSend(ctx, "K1", "desktop", t0); err != nil {
+	if _, err := db.ClaimSend(ctx, "K1", "desktop", nil, t0); err != nil {
 		t.Fatal(err)
 	}
 	if err := db.MarkSent(ctx, "K1", "WAID9"); err != nil {
@@ -344,5 +347,55 @@ func TestMarkSentWithoutTheArchive(t *testing.T) {
 	}
 	if n, _ := db.InterruptSending(ctx); n != 0 {
 		t.Fatalf("a sent draft was interrupted on restart")
+	}
+}
+
+func TestOutboxChatRecentHasTheKindWithoutReactions(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	long := strings.Repeat("n", 130) + ".pdf"
+	insert(t, db, chatA, "M1", "2026-11-24T10:00:00Z", "text", "oi")
+	exec(t, db, `INSERT INTO messages (chat, id, sender, from_me, at, kind, text, source, raw, account)
+		VALUES (?, 'M2', ?, 0, '2026-11-24T10:01:00Z', 'document', 'contrato.pdf', 'whatsapp', ?, ?)`,
+		chatA, chatA, `{"chat":"`+chatA+`","message":{"documentMessage":{"fileName":"contrato.pdf"}}}`, accountA)
+	exec(t, db, `INSERT INTO messages (chat, id, sender, from_me, at, kind, text, source, raw)
+		VALUES (?, 'M3', '', 1, '2026-11-24T10:02:00Z', 'document', '', 'whatsapp', ?)`,
+		chatA, `{"message":{"documentMessage":{"fileName":"`+long+`"}}}`)
+	insert(t, db, chatA, "M4", "2026-11-24T10:03:00Z", "image", "")
+	insert(t, db, chatA, "M5", "2026-11-24T10:04:00Z", "reaction", "👍")
+	exec(t, db, `UPDATE messages SET account = ? WHERE from_me = 0`, accountA)
+
+	info, err := db.OutboxChat(ctx, chatA, accountA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, r := range info.Recent {
+		got = append(got, r.Kind+"|"+r.FileName)
+	}
+	want := []string{"document|contrato.pdf", "document|" + long[:120], "image|"}
+	if !equal(got, want) {
+		t.Fatalf("recent = %v\nwant %v", got, want)
+	}
+}
+
+func TestClaimSendRecordsTheApprovedText(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	pending, _ := create(t, db, draft("E1", "srv::s1", "texto da sessão"), t0)
+	if pending.SentText != "" || pending.Edited {
+		t.Fatalf("pending draft = sent_text %q edited %v; want empty and false", pending.SentText, pending.Edited)
+	}
+	got, err := db.ClaimSend(ctx, "E1", "mobile", ptr("texto do dono"), t0)
+	if err != nil || got.State != "sending" || got.SentText != "texto do dono" || !got.Edited || got.Text != "texto da sessão" {
+		t.Fatalf("edited ClaimSend = %+v, %v", got, err)
+	}
+	create(t, db, draft("E2", "srv::s1", "como veio"), t0)
+	got, err = db.ClaimSend(ctx, "E2", "desktop", nil, t0)
+	if err != nil || got.SentText != "como veio" || got.Edited {
+		t.Fatalf("ClaimSend = %+v, %v", got, err)
+	}
+	if _, err := db.ClaimSend(ctx, "E1", "mobile", ptr("outra"), t0); !errors.Is(err, ErrAnswered) {
+		t.Fatalf("edited send of an answered draft = %v, want ErrAnswered", err)
 	}
 }

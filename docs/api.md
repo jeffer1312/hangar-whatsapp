@@ -1,11 +1,11 @@
-# API do hangar-whatsapp (C1, C2, C5)
+# API do hangar-whatsapp (C1, C2, C5, C7)
 
 Contrato com o Hangar. Forma completa no plano `docs/2026-11-22-whatsapp-somente-leitura.md` do Hangar; aqui
 ficam os detalhes que o cliente precisa para falar com o binário.
 
 ## C1. `control.json` e `control.key`
 
-- `control.json`: `{"version":1,"api":2,"port":<u16>,"pid":<u32>}`, reescrito a cada subida (tmp + rename)
+- `control.json`: `{"version":1,"api":3,"port":<u16>,"pid":<u32>}`, reescrito a cada subida (tmp + rename)
   antes de a porta aceitar pedidos. Porta escolhida pelo sistema em `127.0.0.1`.
 - `control.key`: 32 bytes aleatórios em hex (64 caracteres e `\n`), criado na primeira subida. **A chave do
   HMAC são os 32 bytes decodificados**, não o texto hex. Modo 0600, pasta `--data` 0700.
@@ -64,7 +64,8 @@ Parâmetros:
   móvel, teto 200). 429 só quando a janela já está cheia e havia mídia para pedir. Cada pedido chega ao
   celular uma vez: sem resposta, ele fecha e a mídia continua `expired`, para pedir de novo.
 
-As rotas `/v1/outbox*` (envio por rascunho aprovado) estão na seção C5.
+As rotas `/v1/outbox*` (envio por rascunho aprovado) estão na seção C5; a edição antes do envio e a foto da
+conversa, na C7.
 
 Erro: `{"detail":{"code","msg"}}`. Além dos códigos do contrato (`unauthorized` 401, `bad_request` 400,
 `not_paired` 409, `busy` 503, `outdated` 409, `rate_limited` 429): `internal` 500 para falha inesperada e
@@ -98,12 +99,15 @@ outros.
 
 ## Processo
 
-- `--version` imprime `hangar-whatsapp <versão> (api <n>)`; `api 2` tem o envio por rascunho (C5).
+- `--version` imprime `hangar-whatsapp <versão> (api <n>)`; `api 2` tem o envio por rascunho (C5); `api 3`, a
+  edição do texto antes do envio, a foto da conversa e o tipo das recentes (C7).
 - Mensagem só sai por rascunho que o dono aprovou (`POST /v1/outbox/{id}/send`), com "digitando", upload do
   anexo e a mensagem. O whatsmeow manda sozinho os recibos de entrega (os mesmos que o celular já manda) e
   nenhum recibo de leitura; o serviço não marca como lida nem aparece "online". Fora isso, o login, o logout
-  (`logout`, `wipe`), as reconexões e o download de mídia da CDN do WhatsApp, a outra chamada de saída é o
-  pedido de reenvio de mídia ao celular (`POST /v1/media/request`).
+  (`logout`, `wipe`), as reconexões e o download de mídia da CDN do WhatsApp, as outras chamadas de saída são o
+  pedido de reenvio de mídia ao celular (`POST /v1/media/request`) e a consulta da foto de uma conversa
+  (`GetProfilePictureInfo`, só leitura, com o download da prévia em `*.whatsapp.net`), feita depois de um
+  rascunho novo (C7).
 - O log sai em stderr, no formato texto do `slog`. Ele traz os avisos e erros do whatsmeow (`módulo=whatsapp`
   ou `módulo=sessão`) e os eventos de conexão: conectado, queda, sessão aberta em outro cliente,
   suspensão, conexão recusada e mensagem não decifrada.
@@ -128,15 +132,17 @@ de erro das outras rotas. Horários em UTC, `2006-01-02T15:04:05Z`.
 | `GET /v1/outbox?state=pending` | 200 `{"drafts":[…]}`, os 100 mais novos | 400 sem `state` válido |
 | `GET /v1/outbox/{id}` | 200 rascunho | 404 `not_found` |
 | `POST /v1/outbox/{id}/send` `{"via":"desktop"\|"mobile"}` | 202 rascunho em `sending` | 400 `via` inválido; 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`, `new_contact`, `reachout_locked`; 429 `rate_limited` |
+| `POST /v1/outbox/{id}/send-edited` `{"via","text"}` (api 3, C7) | 202 rascunho em `sending` | os do `send`; 400 `bad_request` também para `text` ausente ou inválido |
 | `POST /v1/outbox/{id}/decline` | 200 rascunho em `declined` | 404 `not_found`; 409 `expired`, `answered` |
 
 Rascunho:
 
 ```json
 {"id","origin","chat","chat_kind":"contact|group","chat_number","chat_name","chat_name_source":"contact|push|group|",
- "recent":[{"from_me","sender","at","text"}],"text","reply_to","quoted_text",
+ "recent":[{"from_me","sender","at","text","kind","file_name"}],"text","reply_to","quoted_text",
  "file":{"name","size","sha256","source","outside_cwd"}|null,
- "created_at","expires_at","state","via","answered_at","message_id","error","wa_code"}
+ "created_at","expires_at","state","via","answered_at","message_id","error","wa_code",
+ "chat_avatar","edited","sent_text"}
 ```
 
 - `state`: `pending`, `sending`, `sent`, `declined`, `expired`, `failed`. Só `pending` aceita `send` e `decline`;
@@ -208,3 +214,57 @@ trava é conferida de novo logo antes da mensagem sair.
 Na subida, todo `sending` vira `failed` com `error = "interrupted"` (sem reenvio) e as cópias sem rascunho
 pendente são apagadas. O `wipe` apaga a tabela `outbox` com o `messages.db`, e também `outbox/`: depois dele,
 `GET /v1/outbox/{id}` de um rascunho antigo responde 404 `not_found`.
+
+## C7. Edição antes do envio e foto da conversa (api 3)
+
+Mesma assinatura e formato de erro. Um binário `api 2` não tem a rota `send-edited`: responde 404 `bad_request`
+(rota desconhecida) e nada sai. O Hangar lê `api` do `control.json` antes de oferecer a edição.
+
+### Envio com texto editado
+
+`POST /v1/outbox/{id}/send-edited` `{"via":"desktop"\|"mobile","text":"..."}`:
+
+- `text` é obrigatório. Ele é normalizado (`\r\n` e `\r` viram `\n`) e validado como na criação: até 4096
+  caracteres, vazio (só espaços) só quando o rascunho tem anexo. Inválido: 400 `bad_request`, e o rascunho continua
+  `pending`.
+- Igual ao texto do rascunho (os dois normalizados): é um envio normal, `edited = false` e `sent_text` é o texto
+  do rascunho.
+- Diferente: `edited = true`, e o que sai é o texto normalizado (com anexo, como legenda; vazio ou só espaços,
+  documento sem legenda e `sent_text` vazio). `text` do rascunho não muda: continua o que a sessão pediu.
+- Mesmos erros e tetos do `send`: 404 `not_found`; 409 `expired`, `answered`, `not_paired`, `outdated`,
+  `new_contact`, `reachout_locked`; 429 `rate_limited`; 400 `via` inválido.
+- 202 com o rascunho em `sending`; o cliente confere `sent_text`.
+
+Exemplo: rascunho com `"text":"chego às 15h"`; o dono manda `{"via":"mobile","text":"chego às 16h\r\nabraço"}`;
+a resposta traz `"state":"sending","edited":true,"sent_text":"chego às 16h\nabraço","text":"chego às 15h"`.
+
+### Campos novos do rascunho
+
+- `sent_text`: o texto aprovado, o mesmo que o envio usa, gravado na transação que passa de `pending` a `sending`
+  (nas duas rotas). Vazio enquanto `pending` e nos rascunhos que nunca foram aprovados (`declined`, `expired`).
+- `edited`: `true` quando saiu pelo `send-edited` com texto diferente.
+- `chat_avatar`: a prévia da foto da conversa em JPEG, em base64, ou `null` (sem foto, escondida, ainda não buscada,
+  ou nenhum número pareado). Lida do cache a cada leitura do rascunho, para o número pareado agora.
+- `recent[].kind`: `text`, `image`, `audio`, `video`, `document`, `sticker` ou `other` (de `messages.kind`). As
+  recentes são as 3 últimas sem contar reações. Rascunho criado por um binário `api 2` não traz `kind`: tratar
+  ausente como texto.
+- `recent[].file_name`: nome do documento (`fileName` da mensagem original, até 120 caracteres); vazio nos outros
+  tipos. Como `text`, é escrito por terceiro.
+
+### Foto da conversa
+
+- Buscada em segundo plano depois do 201 de um rascunho novo, só com aparelho `connected`, uma busca por conversa de
+  cada vez, com prazo de 30 s. Não varre a agenda.
+- Cache por número pareado e conversa (a foto escondida depende de quem pergunta; grupo usa o JID do grupo). Vale
+  24 h; depois, a consulta leva o id da foto guardada e só baixa se ela mudou. "Sem foto" e "escondida" também valem
+  24 h. Erro de rede ou do WhatsApp não grava nada: o próximo rascunho tenta de novo.
+- Teto de 30 consultas em 24 h (janela móvel), contando as que falharam.
+- Download só por `https` de host `*.whatsapp.net` (redirecionamento incluído), até 24 KB, começando por `FF D8 FF`
+  e com até 640×640; fora disso, fica como sem foto.
+- O `wipe` apaga o cache com o `messages.db` e cancela a busca em curso, que não grava nada depois.
+
+### Dados
+
+`outbox` ganha `edited` e `sent_text` por `ALTER TABLE` na subida; `avatars` e `avatar_fetches` são tabelas novas.
+O `user_version` continua 2: um binário 0.2 ainda abre o arquivo e grava rascunhos nele. A cada subida, rascunho
+aprovado sem `sent_text` (pela 0.2, que não o grava) recebe o próprio `text`, que foi o que saiu.

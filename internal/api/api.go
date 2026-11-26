@@ -41,19 +41,20 @@ func New(svc *wa.Service, key []byte, now func() time.Time, log *slog.Logger) ht
 	s := &server{svc: svc, key: key, now: now, log: log}
 	mux := http.NewServeMux()
 	for pattern, h := range map[string]func(http.ResponseWriter, *http.Request) error{
-		"GET /v1/status":               s.status,
-		"POST /v1/pair":                s.pair,
-		"POST /v1/logout":              s.logout,
-		"POST /v1/wipe":                s.wipe,
-		"GET /v1/chats":                s.chats,
-		"GET /v1/messages":             s.messages,
-		"GET /v1/search":               s.search,
-		"POST /v1/media/request":       s.mediaRequest,
-		"POST /v1/outbox":              s.createDraft,
-		"GET /v1/outbox":               s.drafts,
-		"GET /v1/outbox/{id}":          s.draft,
-		"POST /v1/outbox/{id}/send":    s.approveDraft,
-		"POST /v1/outbox/{id}/decline": s.declineDraft,
+		"GET /v1/status":                   s.status,
+		"POST /v1/pair":                    s.pair,
+		"POST /v1/logout":                  s.logout,
+		"POST /v1/wipe":                    s.wipe,
+		"GET /v1/chats":                    s.chats,
+		"GET /v1/messages":                 s.messages,
+		"GET /v1/search":                   s.search,
+		"POST /v1/media/request":           s.mediaRequest,
+		"POST /v1/outbox":                  s.createDraft,
+		"GET /v1/outbox":                   s.drafts,
+		"GET /v1/outbox/{id}":              s.draft,
+		"POST /v1/outbox/{id}/send":        s.approveDraft,
+		"POST /v1/outbox/{id}/send-edited": s.approveEditedDraft,
+		"POST /v1/outbox/{id}/decline":     s.declineDraft,
 	} {
 		mux.HandleFunc(pattern, func(w http.ResponseWriter, r *http.Request) {
 			if err := h(w, r); err != nil {
@@ -430,6 +431,25 @@ func (s *server) approveDraft(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	d, err := s.svc.ApproveDraft(r.Context(), r.PathValue("id"), in.Via)
+	if err != nil {
+		return err
+	}
+	writeJSON(w, http.StatusAccepted, d)
+	return nil
+}
+
+func (s *server) approveEditedDraft(w http.ResponseWriter, r *http.Request) error {
+	var in struct {
+		Via  string  `json:"via"`
+		Text *string `json:"text"`
+	}
+	if err := decode(r, &in); err != nil {
+		return err
+	}
+	if in.Text == nil {
+		return badRequest("text é obrigatório")
+	}
+	d, err := s.svc.ApproveEditedDraft(r.Context(), r.PathValue("id"), in.Via, *in.Text)
 	if err != nil {
 		return err
 	}

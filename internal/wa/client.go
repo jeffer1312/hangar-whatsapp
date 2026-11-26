@@ -14,7 +14,7 @@ import (
 )
 
 // Client is the part of *whatsmeow.Client the service uses. SendMediaRetryReceipt asks the phone to
-// upload old media again; SendChatPresence, UploadReader and SendMessage send a draft the owner
+// upload old media again; GetProfilePictureInfo only reads; SendChatPresence, UploadReader and SendMessage send a draft the owner
 // approved, and only outbox.go may call them (sendlist_test.go).
 type Client interface {
 	Device() *wastore.Device
@@ -27,6 +27,7 @@ type Client interface {
 	ParseWebMessage(chat types.JID, msg *waWeb.WebMessageInfo) (*events.Message, error)
 	DownloadToFile(ctx context.Context, msg whatsmeow.DownloadableMessage, file whatsmeow.File) error
 	SendMediaRetryReceipt(ctx context.Context, info *types.MessageInfo, mediaKey []byte) error
+	GetProfilePictureInfo(ctx context.Context, jid types.JID, params *whatsmeow.GetProfilePictureParams) (*types.ProfilePictureInfo, error)
 	SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error
 	UploadReader(ctx context.Context, plaintext io.Reader, tempFile io.ReadWriteSeeker, appInfo whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	SendMessage(ctx context.Context, to types.JID, message *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)

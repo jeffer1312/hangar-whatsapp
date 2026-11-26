@@ -68,7 +68,7 @@ func str(p *string) string {
 
 func TestStartsUnpairedAndPairShowsTheQR(t *testing.T) {
 	h := newHarness(t, false)
-	if s := h.status(); s.State != "unpaired" || s.QR != nil || s.DeviceName != nil || s.API != 2 || s.Version != "0.1.0" || s.TZ == "" {
+	if s := h.status(); s.State != "unpaired" || s.QR != nil || s.DeviceName != nil || s.API != 3 || s.Version != "0.1.0" || s.TZ == "" {
 		t.Fatalf("fresh status = %+v", s)
 	}
 	if err := h.svc.Pair(""); err != nil {

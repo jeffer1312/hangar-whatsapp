@@ -97,22 +97,40 @@ func migrate(w *sql.DB) error {
 	if v > SchemaVersion {
 		return fmt.Errorf("%w: messages.db is version %d, this binary knows up to %d", ErrSchemaNewer, v, SchemaVersion)
 	}
-	// A version 1 messages table predates account; the schema's index on it needs the column first.
-	var table, account bool
-	if err := w.QueryRow(`SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'),
-		EXISTS (SELECT 1 FROM pragma_table_info('messages') WHERE name = 'account')`).Scan(&table, &account); err != nil {
-		return err
-	}
-	if table && !account {
-		if _, err := w.Exec(`ALTER TABLE messages ADD COLUMN account TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("add messages.account: %w", err)
+	// Columns are added without raising user_version, so that older binaries still open the file; each
+	// one is checked on its own, since a run may stop between two of them.
+	for _, c := range [][3]string{{"messages", "account", "TEXT NOT NULL DEFAULT ''"},
+		{"outbox", "edited", "INTEGER NOT NULL DEFAULT 0"}, {"outbox", "sent_text", "TEXT NOT NULL DEFAULT ''"}} {
+		if err := addColumn(w, c[0], c[1], c[2]); err != nil {
+			return err
 		}
 	}
 	if _, err := w.Exec(schema); err != nil {
 		return fmt.Errorf("create tables: %w", err)
 	}
+	// A binary without sent_text approves drafts without writing it; what it sent was the draft's text.
+	if _, err := w.Exec(`UPDATE outbox SET sent_text = text
+		WHERE state IN ('sending', 'sent', 'failed') AND sent_text = '' AND edited = 0`); err != nil {
+		return fmt.Errorf("fill outbox.sent_text: %w", err)
+	}
 	_, err := w.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, SchemaVersion))
 	return err
+}
+
+// addColumn adds a column to a table that exists without it.
+func addColumn(w *sql.DB, table, column, def string) error {
+	var missing bool
+	if err := w.QueryRow(`SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)
+		AND NOT EXISTS (SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2)`, table, column).Scan(&missing); err != nil {
+		return err
+	}
+	if !missing {
+		return nil
+	}
+	if _, err := w.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + column + ` ` + def); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
 }
 
 func (d *DB) Close() error {

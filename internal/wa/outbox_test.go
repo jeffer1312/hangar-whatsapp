@@ -483,7 +483,7 @@ func TestRestartFailsHalfSentDraftsAndCleansCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Stands for a send cut by the process dying: the state moved, the message never went out.
-	if _, err := svc.in.db.ClaimSend(ctx, sending.ID, "desktop", clk.Now()); err != nil {
+	if _, err := svc.in.db.ClaimSend(ctx, sending.ID, "desktop", nil, clk.Now()); err != nil {
 		t.Fatal(err)
 	}
 	svc.Close()
@@ -891,5 +891,74 @@ func TestApprovalRechecksNewContactForTheSendingNumber(t *testing.T) {
 	}
 	if n := len(h.client().Sent()); n != 0 {
 		t.Fatalf("SendMessage called %d times", n)
+	}
+}
+
+func TestEditedTextIsWhatGoesOut(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "texto da sessão"})
+	got, err := h.svc.ApproveEditedDraft(context.Background(), d.ID, "mobile", "texto do dono\r\nsegunda\rterceira")
+	if err != nil || got.State != "sending" || !got.Edited || got.SentText != "texto do dono\nsegunda\nterceira" {
+		t.Fatalf("ApproveEditedDraft = %+v, %v", got, err)
+	}
+	d = h.waitState(d.ID, "sent")
+	sent := h.client().Sent()
+	if len(sent) != 1 || sent[0].Message.GetConversation() != "texto do dono\nsegunda\nterceira" {
+		t.Fatalf("sent = %+v; want the edited text", sent)
+	}
+	if d.Text != "texto da sessão" || d.SentText != "texto do dono\nsegunda\nterceira" || !d.Edited {
+		t.Fatalf("sent draft = text %q sent_text %q edited %v", d.Text, d.SentText, d.Edited)
+	}
+}
+
+func TestEditedTextIsCheckedLikeANewDraft(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "oi"})
+	for _, text := range []string{" \r\n ", strings.Repeat("é", 4097), strings.Repeat("é", 4096) + "\r"} {
+		if _, err := h.svc.ApproveEditedDraft(context.Background(), d.ID, "desktop", text); !errors.Is(err, ErrBadDraft) {
+			t.Fatalf("edited text of %d characters = %v, want ErrBadDraft", len([]rune(text)), err)
+		}
+	}
+	if got, err := h.svc.Draft(context.Background(), d.ID); err != nil || got.State != "pending" {
+		t.Fatalf("draft after refused edits = %+v, %v; want pending", got, err)
+	}
+	if len(h.client().Sent()) != 0 {
+		t.Fatal("a refused edit sent something")
+	}
+	// 4096 characters once \r\n is one character.
+	ok := strings.Repeat("é", 4095) + "\r\n"
+	if _, err := h.svc.ApproveEditedDraft(context.Background(), d.ID, "desktop", ok); err != nil {
+		t.Fatalf("4096 characters after normalizing = %v", err)
+	}
+	h.waitState(d.ID, "sent")
+
+	zip := writeFile(t, filepath.Join(t.TempDir(), "a.zip"), "PK")
+	f := h.mustDraft(DraftRequest{Chat: chatA, Text: "segue", File: zip, Origin: "notebook::s2"})
+	got, err := h.svc.ApproveEditedDraft(context.Background(), f.ID, "desktop", " \r\n ")
+	if err != nil || got.SentText != "" || !got.Edited {
+		t.Fatalf("blank edited text with a file = %+v, %v; want sent_text empty", got, err)
+	}
+	h.waitState(f.ID, "sent")
+	if doc := h.client().Sent()[1].Message.GetDocumentMessage(); doc == nil || doc.Caption != nil {
+		t.Fatalf("document = %v; want no caption", h.client().Sent()[1].Message)
+	}
+}
+
+func TestSameTextAfterNormalizingIsANormalSend(t *testing.T) {
+	h := newOutboxHarness(t, true)
+	h.receive("M1", "olá")
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "linha 1\nlinha 2"})
+	got, err := h.svc.ApproveEditedDraft(context.Background(), d.ID, "desktop", "linha 1\r\nlinha 2")
+	if err != nil || got.Edited || got.SentText != "linha 1\nlinha 2" {
+		t.Fatalf("same text = %+v, %v; want a normal send", got, err)
+	}
+	h.waitState(d.ID, "sent")
+
+	n := h.mustDraft(DraftRequest{Chat: chatA, Text: "pela rota de sempre", Origin: "notebook::s2"})
+	got, err = h.svc.ApproveDraft(context.Background(), n.ID, "desktop")
+	if err != nil || got.Edited || got.SentText != "pela rota de sempre" {
+		t.Fatalf("ApproveDraft = %+v, %v; want sent_text recorded", got, err)
 	}
 }
