@@ -11,11 +11,13 @@ var ErrRateLimited = errors.New("rate_limited")
 
 type Record struct {
 	Chat, ID, Sender string
-	FromMe           bool
-	At               time.Time
-	Kind, Text       string
-	Mime, ReplyTo    string
-	Raw              string
+	// The paired number that archived or sent it.
+	Account       string
+	FromMe        bool
+	At            time.Time
+	Kind, Text    string
+	Mime, ReplyTo string
+	Raw           string
 }
 
 // Save never replaces what is there; only a row without a media file is redone, so media the
@@ -30,12 +32,12 @@ type execer interface {
 
 func save(ctx context.Context, ex execer, r Record) error {
 	_, err := ex.ExecContext(ctx, `INSERT INTO messages (chat, id, sender, from_me, at, kind, text,
-			media_mime, reply_to, source, raw)
-		VALUES (?, ?, ?, ?, ?, ?, ?, nullif(?, ''), nullif(?, ''), 'whatsapp', ?)
+			media_mime, reply_to, source, raw, account)
+		VALUES (?, ?, ?, ?, ?, ?, ?, nullif(?, ''), nullif(?, ''), 'whatsapp', ?, ?)
 		ON CONFLICT (chat, id) DO UPDATE SET kind = excluded.kind, text = excluded.text,
 			media_mime = excluded.media_mime, media_error = NULL, source = excluded.source, raw = excluded.raw
 		WHERE messages.media IS NULL AND excluded.media_mime IS NOT NULL`,
-		r.Chat, r.ID, r.Sender, r.FromMe, r.At.UTC().Format(TimeLayout), r.Kind, r.Text, r.Mime, r.ReplyTo, r.Raw)
+		r.Chat, r.ID, r.Sender, r.FromMe, r.At.UTC().Format(TimeLayout), r.Kind, r.Text, r.Mime, r.ReplyTo, r.Raw, r.Account)
 	return err
 }
 

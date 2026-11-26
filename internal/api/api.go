@@ -160,9 +160,6 @@ func (s *server) fail(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "answered", err.Error())
 	case errors.Is(err, wa.ErrReachoutLocked):
 		writeError(w, http.StatusConflict, "reachout_locked", err.Error())
-	case errors.Is(err, wa.ErrAccountChanged):
-		writeError(w, http.StatusConflict, "account_changed",
-			"o WhatsApp pareado é outro número, não o dono do arquivo; para enviar, apague os dados do WhatsApp e pareie de novo")
 	case errors.Is(err, store.ErrSendLimit):
 		writeError(w, http.StatusTooManyRequests, "rate_limited",
 			fmt.Sprintf("limite de envios atingido (%d por minuto, %d em 24 h)", store.SendsPerMinute, store.SendsPerDay))

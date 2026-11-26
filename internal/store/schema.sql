@@ -23,11 +23,14 @@ CREATE TABLE IF NOT EXISTS messages (
 	-- prochat or whatsapp
 	source TEXT NOT NULL,
 	raw TEXT,
+	-- The paired number that archived or sent it; empty for rows from before it was kept, until a number pairs.
+	account TEXT NOT NULL DEFAULT '',
 	PRIMARY KEY (chat, id)
 );
 
 CREATE INDEX IF NOT EXISTS messages_chat_at ON messages (chat, at);
 CREATE INDEX IF NOT EXISTS messages_at ON messages (at);
+CREATE INDEX IF NOT EXISTS messages_unowned ON messages (chat) WHERE account = '';
 -- Media still without a file: the downloader reads only these, every 30 s.
 CREATE INDEX IF NOT EXISTS messages_media_pending ON messages (at)
 	WHERE source = 'whatsapp' AND media IS NULL AND media_mime IS NOT NULL;

@@ -820,23 +820,44 @@ func TestReplacedClientCannotTouchTheReachoutLock(t *testing.T) {
 	}
 }
 
-func TestArchiveOwnerIsTheFirstPairedNumber(t *testing.T) {
+func TestNewContactIsPerNumber(t *testing.T) {
 	h := newOutboxHarness(t, true)
-	if owner, err := h.svc.in.db.Owner(context.Background()); err != nil || owner != watest.OwnJID.User {
-		t.Fatalf("owner = %q, %v; want the paired number %s", owner, err, watest.OwnJID.User)
+	h.receive("M1", "olá")
+	var account string
+	db, err := sql.Open("sqlite", "file:"+store.MessagesPath(h.dir)+"?_pragma=busy_timeout(10000)")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if h.status().AccountChanged {
-		t.Fatal("account_changed with the owner paired")
+	defer db.Close()
+	if err := db.QueryRow(`SELECT account FROM messages WHERE id = 'M1'`).Scan(&account); err != nil || account != watest.OwnJID.User {
+		t.Fatalf("archived account = %q, %v; want the paired number", account, err)
+	}
+	// Someone who wrote only while another number was paired (A → B → A without a wipe).
+	other := "556477776666@s.whatsapp.net"
+	if _, err := db.Exec(`INSERT INTO messages (chat, id, sender, from_me, at, kind, text, source, account)
+		VALUES (?, 'B1', ?, 0, '2026-11-24T11:00:00Z', 'text', 'oi B', 'whatsapp', '5511988887777')`, other, other); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := h.draft(DraftRequest{Chat: other, Text: "oi"}); !errors.Is(err, store.ErrNewContact) {
+		t.Fatalf("draft to someone who wrote only to another number = %v, want ErrNewContact", err)
+	}
+	d := h.mustDraft(DraftRequest{Chat: chatA, Text: "oi"})
+	h.approve(d.ID)
+	h.waitState(d.ID, "sent")
+	var sentAccount string
+	if err := db.QueryRow(`SELECT account FROM messages WHERE from_me = 1`).Scan(&sentAccount); err != nil || sentAccount != watest.OwnJID.User {
+		t.Fatalf("sent message account = %q, %v", sentAccount, err)
 	}
 }
 
-func TestAnotherNumberCannotSendFromTheArchive(t *testing.T) {
+func TestMigratedMessagesCountForTheNumberPairedAtUpgrade(t *testing.T) {
 	dir := t.TempDir()
 	db, err := store.Open(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.ClaimOwner(context.Background(), "5511988887777"); err != nil {
+	if err := db.Save(context.Background(), store.Record{Chat: chatA, ID: "OLD1", Sender: chatA, At: time.Date(2026, 11, 20, 9, 0, 0, 0, time.UTC),
+		Kind: "text", Text: "da 0.1.x"}); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -844,25 +865,7 @@ func TestAnotherNumberCannotSendFromTheArchive(t *testing.T) {
 	h := &outboxHarness{harness: &harness{t: t, dir: dir, clients: watest.NewFactory(true)}, clock: clk}
 	h.svc = openOutbox(t, dir, clk, h.clients)
 	t.Cleanup(func() { h.svc.Close() })
-	h.receive("M1", "olá")
-	if !h.status().AccountChanged {
-		t.Fatal("status account_changed = false with another number paired")
-	}
-	if _, _, err := h.draft(DraftRequest{Chat: chatA, Text: "oi"}); !errors.Is(err, ErrAccountChanged) {
-		t.Fatalf("CreateDraft = %v, want ErrAccountChanged", err)
-	}
-	// A draft made while the owner was paired stays pending and is not sent.
-	if _, _, err := h.svc.in.db.CreateDraft(context.Background(), store.Draft{ID: "P1", Origin: "n::s", Chat: chatA,
-		Address: chatA, Text: "antes", ChatKind: "contact", ChatNumber: "556499990000", Recent: []store.Recent{}}, h.clock.Now()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.svc.ApproveDraft(context.Background(), "P1", "desktop"); !errors.Is(err, ErrAccountChanged) {
-		t.Fatalf("ApproveDraft = %v, want ErrAccountChanged", err)
-	}
-	if d, _ := h.svc.Draft(context.Background(), "P1"); d.State != "pending" {
-		t.Fatalf("draft after the refusal = %s, want pending", d.State)
-	}
-	if n := len(h.client().Sent()); n != 0 {
-		t.Fatalf("SendMessage called %d times by another number", n)
+	if d, _, err := h.draft(DraftRequest{Chat: chatA, Text: "oi"}); err != nil {
+		t.Fatalf("draft to a chat of the 0.1.x archive = %+v, %v; want it allowed for the paired number", d, err)
 	}
 }

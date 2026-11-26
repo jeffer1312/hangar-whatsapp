@@ -51,6 +51,14 @@ func (a *archiver) normalize(cli Client, j types.JID) types.JID {
 	return j
 }
 
+// accountOf is the paired number a message is archived or sent under.
+func accountOf(cli Client) string {
+	if id := cli.Device().ID; id != nil {
+		return id.User
+	}
+	return ""
+}
+
 func ignored(chat types.JID) bool {
 	return chat.Server == types.BroadcastServer || chat.Server == types.NewsletterServer
 }
@@ -84,7 +92,7 @@ func (a *archiver) message(cli Client, e *events.Message, chat types.JID) (media
 		a.log.Error("serializar mensagem", "erro", err)
 		return false, true
 	}
-	r := store.Record{Chat: chat.String(), ID: info.ID, FromMe: info.IsFromMe, At: info.Timestamp,
+	r := store.Record{Chat: chat.String(), ID: info.ID, Account: accountOf(cli), FromMe: info.IsFromMe, At: info.Timestamp,
 		Kind: c.kind, Text: c.text, Mime: c.mime, ReplyTo: c.replyTo, Raw: raw}
 	if !info.IsFromMe {
 		r.Sender = a.normalize(cli, info.Sender).String()

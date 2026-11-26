@@ -379,8 +379,8 @@ func (d *DB) InterruptSending(ctx context.Context) (int64, error) {
 }
 
 // OutboxChat is what a draft needs from the archive: where to send, the name and the last messages.
-// A chat with no message from the other side is a new contact.
-func (d *DB) OutboxChat(ctx context.Context, chat string) (ChatInfo, error) {
+// A chat with no message from the other side to account (the paired number) is a new contact.
+func (d *DB) OutboxChat(ctx context.Context, chat, account string) (ChatInfo, error) {
 	var info ChatInfo
 	err := d.read(ctx, func(ctx context.Context) error {
 		var address sql.NullString
@@ -388,8 +388,8 @@ func (d *DB) OutboxChat(ctx context.Context, chat string) (ChatInfo, error) {
 		if err := d.r.QueryRowContext(ctx, `SELECT
 				(SELECT coalesce(nullif(iif(json_valid(raw), json_extract(raw, '$.chat'), NULL), ''), chat)
 					FROM messages WHERE chat = ?1 ORDER BY at DESC, id DESC LIMIT 1),
-				EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND from_me = 0),
-				coalesce((SELECT name FROM contacts WHERE jid = ?1), '')`, chat).Scan(&address, &incoming, &info.Name); err != nil {
+				EXISTS (SELECT 1 FROM messages WHERE chat = ?1 AND from_me = 0 AND account = ?2),
+				coalesce((SELECT name FROM contacts WHERE jid = ?1), '')`, chat, account).Scan(&address, &incoming, &info.Name); err != nil {
 			return err
 		}
 		if !address.Valid {
@@ -440,29 +440,6 @@ func (d *DB) Quoted(ctx context.Context, chat, id string) (string, string, error
 
 const reachoutKey = "reachout_locked_until"
 
-// ownerKey is the number of the account that built the archive.
-const ownerKey = "owner"
-
-func (d *DB) Owner(ctx context.Context) (string, error) {
-	var owner string
-	err := d.read(ctx, func(ctx context.Context) error {
-		err := d.r.QueryRowContext(ctx, `SELECT value FROM settings WHERE key = ?`, ownerKey).Scan(&owner)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil
-		}
-		return err
-	})
-	return owner, err
-}
-
-// ClaimOwner records number as the owner when the archive has none, and returns the owner.
-func (d *DB) ClaimOwner(ctx context.Context, number string) (string, error) {
-	var owner string
-	err := d.w.QueryRowContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
-		ON CONFLICT (key) DO UPDATE SET value = value RETURNING value`, ownerKey, number).Scan(&owner)
-	return owner, err
-}
-
 // ReachoutLock is until when WhatsApp forbids messages to new contacts, empty without a lock.
 func (d *DB) ReachoutLock(ctx context.Context) (string, error) {
 	var until string
@@ -480,6 +457,12 @@ func (d *DB) ReachoutLock(ctx context.Context) (string, error) {
 func (d *DB) ExtendReachoutLock(ctx context.Context, until string) error {
 	_, err := d.w.ExecContext(ctx, `INSERT INTO settings (key, value) VALUES (?, ?)
 		ON CONFLICT (key) DO UPDATE SET value = excluded.value WHERE excluded.value > settings.value`, reachoutKey, until)
+	return err
+}
+
+// AdoptMessages gives the rows with no number (archived before the number was kept) to account.
+func (d *DB) AdoptMessages(ctx context.Context, account string) error {
+	_, err := d.w.ExecContext(ctx, `UPDATE messages SET account = ? WHERE account = ''`, account)
 	return err
 }
 

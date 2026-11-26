@@ -97,6 +97,17 @@ func migrate(w *sql.DB) error {
 	if v > SchemaVersion {
 		return fmt.Errorf("%w: messages.db is version %d, this binary knows up to %d", ErrSchemaNewer, v, SchemaVersion)
 	}
+	// A version 1 messages table predates account; the schema's index on it needs the column first.
+	var table, account bool
+	if err := w.QueryRow(`SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages'),
+		EXISTS (SELECT 1 FROM pragma_table_info('messages') WHERE name = 'account')`).Scan(&table, &account); err != nil {
+		return err
+	}
+	if table && !account {
+		if _, err := w.Exec(`ALTER TABLE messages ADD COLUMN account TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add messages.account: %w", err)
+		}
+	}
 	if _, err := w.Exec(schema); err != nil {
 		return fmt.Errorf("create tables: %w", err)
 	}

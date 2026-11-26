@@ -236,15 +236,17 @@ func TestFinishAndInterrupt(t *testing.T) {
 	}
 }
 
+const ownA = "556411112222"
+
 func TestOutboxChat(t *testing.T) {
 	db := openDB(t)
 	ctx := context.Background()
-	if _, err := db.OutboxChat(ctx, chatA); !errors.Is(err, ErrUnknownChat) {
+	if _, err := db.OutboxChat(ctx, chatA, ownA); !errors.Is(err, ErrUnknownChat) {
 		t.Fatalf("empty archive = %v, want ErrUnknownChat", err)
 	}
 	save := func(id string, fromMe bool, at time.Time, text, rawChat string) {
 		t.Helper()
-		r := Record{Chat: chatA, ID: id, FromMe: fromMe, At: at, Kind: "text", Text: text,
+		r := Record{Chat: chatA, ID: id, Account: ownA, FromMe: fromMe, At: at, Kind: "text", Text: text,
 			Raw: fmt.Sprintf(`{"chat":%q,"sender":"","from_me":%v,"group":false,"message":{"conversation":%q}}`, rawChat, fromMe, text)}
 		if !fromMe {
 			r.Sender = chatA
@@ -254,7 +256,7 @@ func TestOutboxChat(t *testing.T) {
 		}
 	}
 	save("S1", true, t0.Add(-5*time.Minute), "fui eu", chatA)
-	if _, err := db.OutboxChat(ctx, chatA); !errors.Is(err, ErrNewContact) {
+	if _, err := db.OutboxChat(ctx, chatA, ownA); !errors.Is(err, ErrNewContact) {
 		t.Fatalf("only outgoing messages = %v, want ErrNewContact", err)
 	}
 	save("S2", false, t0.Add(-4*time.Minute), "um", chatA)
@@ -263,9 +265,13 @@ func TestOutboxChat(t *testing.T) {
 	if err := db.Contact(ctx, chatA, "Maria", true); err != nil {
 		t.Fatal(err)
 	}
-	info, err := db.OutboxChat(ctx, chatA)
+	info, err := db.OutboxChat(ctx, chatA, ownA)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Another number never got a message from this person: for it, a new contact.
+	if _, err := db.OutboxChat(ctx, chatA, "5511988887777"); !errors.Is(err, ErrNewContact) {
+		t.Fatalf("chat that wrote only to another number = %v, want ErrNewContact", err)
 	}
 	if info.Address != "88887777@lid" || info.Name != "Maria" || len(info.Recent) != 3 {
 		t.Fatalf("OutboxChat = %+v", info)
@@ -320,20 +326,6 @@ func TestReachoutLockOnlyGrows(t *testing.T) {
 	}
 	if until, _ := db.ReachoutLock(ctx); until != "2026-11-26T12:00:00Z" {
 		t.Fatalf("lock after a shorter hold = %q, want the later end", until)
-	}
-}
-
-func TestOwnerIsClaimedOnce(t *testing.T) {
-	db := openDB(t)
-	ctx := context.Background()
-	if owner, err := db.Owner(ctx); err != nil || owner != "" {
-		t.Fatalf("fresh owner = %q, %v", owner, err)
-	}
-	if owner, err := db.ClaimOwner(ctx, "556411112222"); err != nil || owner != "556411112222" {
-		t.Fatalf("first claim = %q, %v", owner, err)
-	}
-	if owner, err := db.ClaimOwner(ctx, "5511988887777"); err != nil || owner != "556411112222" {
-		t.Fatalf("second claim = %q, %v; want the first number kept", owner, err)
 	}
 }
 
