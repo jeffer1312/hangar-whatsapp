@@ -108,6 +108,20 @@ func migrate(w *sql.DB) error {
 			return fmt.Errorf("add messages.account: %w", err)
 		}
 	}
+	// A 0.2 outbox predates the edit; the version stays 2 so that a 0.2 binary still opens the file.
+	var outbox, edited bool
+	if err := w.QueryRow(`SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'outbox'),
+		EXISTS (SELECT 1 FROM pragma_table_info('outbox') WHERE name = 'edited')`).Scan(&outbox, &edited); err != nil {
+		return err
+	}
+	if outbox && !edited {
+		for _, q := range []string{`ALTER TABLE outbox ADD COLUMN edited INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE outbox ADD COLUMN sent_text TEXT NOT NULL DEFAULT ''`} {
+			if _, err := w.Exec(q); err != nil {
+				return fmt.Errorf("add outbox edit columns: %w", err)
+			}
+		}
+	}
 	if _, err := w.Exec(schema); err != nil {
 		return fmt.Errorf("create tables: %w", err)
 	}

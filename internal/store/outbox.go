@@ -48,10 +48,10 @@ type DraftFile struct {
 }
 
 type Recent struct {
-	FromMe bool   `json:"from_me"`
-	Sender string `json:"sender"`
-	At     string `json:"at"`
-	Text   string `json:"text"`
+	FromMe   bool   `json:"from_me"`
+	Sender   string `json:"sender"`
+	At       string `json:"at"`
+	Text     string `json:"text"`
 	Kind     string `json:"kind,omitempty"`
 	FileName string `json:"file_name"`
 }
@@ -79,6 +79,8 @@ type Draft struct {
 	WACode         *int       `json:"wa_code"`
 	// The cached picture of the chat as the paired number sees it, read on every read of the draft.
 	ChatAvatar []byte `json:"chat_avatar"`
+	Edited     bool   `json:"edited"`
+	SentText   string `json:"sent_text"`
 	// Address is where the message goes; QuotedRaw is the raw column of the quoted message.
 	Address   string `json:"-"`
 	QuotedRaw string `json:"-"`
@@ -91,7 +93,7 @@ type ChatInfo struct {
 
 const draftColumns = `id, origin, chat, address, chat_kind, chat_number, chat_name, chat_name_source, recent, text,
 	reply_to, quoted_text, quoted_raw, file_name, file_size, file_sha256, file_source, file_outside_cwd,
-	created_at, expires_at, state, via, answered_at, message_id, error, wa_code`
+	created_at, expires_at, state, via, answered_at, message_id, error, wa_code, edited, sent_text`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -109,7 +111,7 @@ func scanDraft(row rowScanner) (Draft, error) {
 	var outside sql.NullBool
 	err := row.Scan(&dr.ID, &dr.Origin, &dr.Chat, &dr.Address, &dr.ChatKind, &dr.ChatNumber, &dr.ChatName, &dr.ChatNameSource,
 		&recent, &dr.Text, &dr.ReplyTo, &dr.QuotedText, &quotedRaw, &fileName, &fileSize, &fileSHA, &fileSource, &outside,
-		&dr.CreatedAt, &dr.ExpiresAt, &dr.State, &dr.Via, &dr.AnsweredAt, &dr.MessageID, &dr.Error, &waCode)
+		&dr.CreatedAt, &dr.ExpiresAt, &dr.State, &dr.Via, &dr.AnsweredAt, &dr.MessageID, &dr.Error, &waCode, &dr.Edited, &dr.SentText)
 	if errors.Is(err, sql.ErrNoRows) {
 		return dr, ErrDraftNotFound
 	} else if err != nil {
@@ -310,9 +312,18 @@ func (d *DB) answer(ctx context.Context, id string, now time.Time, change func(t
 	return dr, tx.Commit()
 }
 
-// ClaimSend moves a pending draft to sending. The caps and the change share the transaction, so two
-// approvals at once cannot both pass the count or both win the same draft.
+// ClaimSend moves a pending draft to sending with its own text. The caps and the change share the
+// transaction, so two approvals at once cannot both pass the count or both win the same draft.
 func (d *DB) ClaimSend(ctx context.Context, id, via string, now time.Time) (Draft, error) {
+	return d.claim(ctx, id, via, nil, now)
+}
+
+// ClaimEditedSend is ClaimSend with the text the owner wrote in place of the draft's.
+func (d *DB) ClaimEditedSend(ctx context.Context, id, via, text string, now time.Time) (Draft, error) {
+	return d.claim(ctx, id, via, &text, now)
+}
+
+func (d *DB) claim(ctx context.Context, id, via string, text *string, now time.Time) (Draft, error) {
 	return d.answer(ctx, id, now, func(tx *sql.Tx) error {
 		minute, day, err := sendCounts(ctx, tx, now)
 		if err != nil {
@@ -321,8 +332,9 @@ func (d *DB) ClaimSend(ctx context.Context, id, via string, now time.Time) (Draf
 		if minute >= SendsPerMinute || day >= SendsPerDay {
 			return ErrSendLimit
 		}
-		_, err = tx.ExecContext(ctx, `UPDATE outbox SET state = 'sending', via = ?, answered_at = ? WHERE id = ?`,
-			via, now.UTC().Format(TimeLayout), id)
+		_, err = tx.ExecContext(ctx, `UPDATE outbox SET state = 'sending', via = ?1, answered_at = ?2,
+				sent_text = coalesce(?3, text), edited = ?3 IS NOT NULL WHERE id = ?4`,
+			via, now.UTC().Format(TimeLayout), text, id)
 		return err
 	})
 }

@@ -81,7 +81,11 @@ CREATE TABLE IF NOT EXISTS outbox (
 	answered_at TEXT,
 	message_id TEXT,
 	error TEXT,
-	wa_code INTEGER
+	wa_code INTEGER,
+	-- 1 when the owner changed the text before sending.
+	edited INTEGER NOT NULL DEFAULT 0,
+	-- The text approved for sending, written when the draft leaves pending; empty before.
+	sent_text TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS outbox_state ON outbox (state, created_at);

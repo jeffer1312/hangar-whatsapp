@@ -25,8 +25,8 @@ import (
 	"github.com/jeffer1312/hangar-whatsapp/internal/store"
 )
 
-// API 2 adds the outbox (C5).
-const API = 2
+// API 2 adds the outbox (C5); 3 the edited send, the chat picture and the kind of recent messages (C7).
+const API = 3
 
 // Pairing codes have no published expiry; the login socket closes when the QR codes run out
 // (60 s plus five of 20 s).

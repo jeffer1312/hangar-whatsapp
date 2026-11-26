@@ -48,6 +48,18 @@ type DraftRequest struct {
 
 func badDraft(msg string) error { return fmt.Errorf("%w: %s", ErrBadDraft, msg) }
 
+func checkText(text string, file bool) error {
+	switch {
+	case utf8.RuneCountInString(text) > maxDraftText:
+		return badDraft(fmt.Sprintf("o texto passa de %d caracteres", maxDraftText))
+	case strings.TrimSpace(text) == "" && !file:
+		return badDraft("texto vazio sem anexo")
+	}
+	return nil
+}
+
+var newlines = strings.NewReplacer("\r\n", "\n", "\r", "\n")
+
 func outboxDir(dir string) string { return filepath.Join(dir, "outbox") }
 
 // copyDir holds the copy of a draft's attachment.
@@ -72,13 +84,11 @@ func (s *Service) CreateDraft(ctx context.Context, req DraftRequest) (store.Draf
 }
 
 func (s *Service) createDraft(ctx context.Context, in *instance, req DraftRequest) (store.Draft, bool, error) {
-	switch {
-	case strings.TrimSpace(req.Origin) == "":
+	if strings.TrimSpace(req.Origin) == "" {
 		return store.Draft{}, false, badDraft("origin é obrigatório")
-	case utf8.RuneCountInString(req.Text) > maxDraftText:
-		return store.Draft{}, false, badDraft(fmt.Sprintf("o texto passa de %d caracteres", maxDraftText))
-	case strings.TrimSpace(req.Text) == "" && req.File == "":
-		return store.Draft{}, false, badDraft("texto vazio sem anexo")
+	}
+	if err := checkText(req.Text, req.File != ""); err != nil {
+		return store.Draft{}, false, err
 	}
 	jid, err := types.ParseJID(req.Chat)
 	if err != nil {
@@ -300,6 +310,17 @@ func (s *Service) checkReachout(ctx context.Context, in *instance) error {
 // ApproveDraft approves a pending draft. The send runs after the answer, on the service's context, so
 // the request ending does not cut it.
 func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft, error) {
+	return s.approve(ctx, id, via, nil)
+}
+
+// ApproveEditedDraft approves a pending draft with the owner's text in place of the session's. A text
+// equal to the draft's once line breaks are normalized is a plain approval.
+func (s *Service) ApproveEditedDraft(ctx context.Context, id, via, text string) (store.Draft, error) {
+	text = newlines.Replace(text)
+	return s.approve(ctx, id, via, &text)
+}
+
+func (s *Service) approve(ctx context.Context, id, via string, text *string) (store.Draft, error) {
 	if via != "desktop" && via != "mobile" {
 		return store.Draft{}, badDraft(`via deve ser "desktop" ou "mobile"`)
 	}
@@ -315,6 +336,14 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		if err != nil {
 			return store.Draft{}, err
 		}
+		if text != nil {
+			if err := checkText(*text, d.File != nil); err != nil {
+				return store.Draft{}, err
+			}
+			if *text == newlines.Replace(d.Text) {
+				text = nil
+			}
+		}
 		cli, err := s.pairedClient()
 		if err != nil {
 			return store.Draft{}, err
@@ -326,7 +355,11 @@ func (s *Service) ApproveDraft(ctx context.Context, id, via string) (store.Draft
 		if err := s.checkReachout(ctx, in); err != nil {
 			return store.Draft{}, err
 		}
-		d, err = in.db.ClaimSend(ctx, id, via, s.now())
+		if text == nil {
+			d, err = in.db.ClaimSend(ctx, id, via, s.now())
+		} else {
+			d, err = in.db.ClaimEditedSend(ctx, id, via, *text, s.now())
+		}
 		if errors.Is(err, store.ErrExpired) {
 			s.sweep(ctx, in, false)
 		}
@@ -444,7 +477,7 @@ func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d stor
 	if err := cli.SendChatPresence(ctx, to, types.ChatPresenceComposing, types.ChatPresenceMediaText); err != nil {
 		return nil, resp, fmt.Errorf("mostrar digitando: %w", err)
 	}
-	if err := s.opt.Wait(ctx, typingFor(d.Text)); err != nil {
+	if err := s.opt.Wait(ctx, typingFor(d.SentText)); err != nil {
 		return nil, resp, err
 	}
 	if err := cli.SendChatPresence(ctx, to, types.ChatPresencePaused, types.ChatPresenceMediaText); err != nil {
@@ -458,15 +491,15 @@ func (s *Service) transmit(ctx context.Context, in *instance, cli Client, d stor
 		if err != nil {
 			return nil, resp, err
 		}
-		if d.Text != "" {
-			doc.Caption = proto.String(d.Text)
+		if d.SentText != "" {
+			doc.Caption = proto.String(d.SentText)
 		}
 		doc.ContextInfo = quote
 		msg = &waE2E.Message{DocumentMessage: doc}
 	case quote != nil:
-		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(d.Text), ContextInfo: quote}}
+		msg = &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(d.SentText), ContextInfo: quote}}
 	default:
-		msg = &waE2E.Message{Conversation: proto.String(d.Text)}
+		msg = &waE2E.Message{Conversation: proto.String(d.SentText)}
 	}
 	// A lock may have arrived during the typing wait or the upload.
 	if err := s.checkReachout(ctx, in); err != nil {

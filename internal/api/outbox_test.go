@@ -40,7 +40,8 @@ func body(v any) string {
 }
 
 var draftFields = []string{"id", "origin", "chat", "chat_kind", "chat_number", "chat_name", "chat_name_source", "recent", "text",
-	"reply_to", "quoted_text", "file", "created_at", "expires_at", "state", "via", "answered_at", "message_id", "error", "wa_code"}
+	"reply_to", "quoted_text", "file", "created_at", "expires_at", "state", "via", "answered_at", "message_id", "error", "wa_code",
+	"chat_avatar", "edited", "sent_text"}
 
 func TestOutboxCreate(t *testing.T) {
 	e := newEnv(t, true)
@@ -202,5 +203,34 @@ func TestOutboxAnswer(t *testing.T) {
 	}
 	if v, ok := st["reachout_locked_until"]; !ok || v != nil {
 		t.Fatalf("status reachout_locked_until = %v (present %v); want null", v, ok)
+	}
+}
+
+func TestOutboxSendEdited(t *testing.T) {
+	e := newEnv(t, true)
+	e.seed(1)
+	r := e.do("POST", "/v1/outbox", `{"chat":"556499990000","text":"oi","origin":"notebook::s1"}`)
+	id, _ := r.json(t)["id"].(string)
+	if r.status != 201 {
+		t.Fatalf("create = %d %s", r.status, r.body)
+	}
+	for _, c := range []struct{ name, body string }{
+		{"no text", `{"via":"desktop"}`},
+		{"blank text", `{"via":"desktop","text":"  "}`},
+		{"bad via", `{"via":"tablet","text":"olá"}`},
+	} {
+		if r := e.do("POST", "/v1/outbox/"+id+"/send-edited", c.body); r.status != 400 || r.code(t) != "bad_request" {
+			t.Fatalf("%s = %d %s", c.name, r.status, r.body)
+		}
+	}
+	r = e.do("POST", "/v1/outbox/"+id+"/send-edited", `{"via":"mobile","text":"olá, tudo bem?"}`)
+	if m := r.json(t); r.status != 202 || m["state"] != "sending" || m["edited"] != true || m["sent_text"] != "olá, tudo bem?" || m["text"] != "oi" {
+		t.Fatalf("send-edited = %d %s", r.status, r.body)
+	}
+	if r := e.do("POST", "/v1/outbox/"+id+"/send-edited", `{"via":"mobile","text":"de novo"}`); r.status != 409 || r.code(t) != "answered" {
+		t.Fatalf("second send-edited = %d %s", r.status, r.body)
+	}
+	if r := e.do("POST", "/v1/outbox/nope/send-edited", `{"via":"mobile","text":"x"}`); r.status != 404 || r.code(t) != "not_found" {
+		t.Fatalf("send-edited unknown = %d %s", r.status, r.body)
 	}
 }

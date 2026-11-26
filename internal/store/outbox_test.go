@@ -376,3 +376,24 @@ func TestOutboxChatRecentHasTheKindWithoutReactions(t *testing.T) {
 		t.Fatalf("recent = %v\nwant %v", got, want)
 	}
 }
+
+func TestClaimSendRecordsTheApprovedText(t *testing.T) {
+	db := openDB(t)
+	ctx := context.Background()
+	pending, _ := create(t, db, draft("E1", "srv::s1", "texto da sessão"), t0)
+	if pending.SentText != "" || pending.Edited {
+		t.Fatalf("pending draft = sent_text %q edited %v; want empty and false", pending.SentText, pending.Edited)
+	}
+	got, err := db.ClaimEditedSend(ctx, "E1", "mobile", "texto do dono", t0)
+	if err != nil || got.State != "sending" || got.SentText != "texto do dono" || !got.Edited || got.Text != "texto da sessão" {
+		t.Fatalf("ClaimEditedSend = %+v, %v", got, err)
+	}
+	create(t, db, draft("E2", "srv::s1", "como veio"), t0)
+	got, err = db.ClaimSend(ctx, "E2", "desktop", t0)
+	if err != nil || got.SentText != "como veio" || got.Edited {
+		t.Fatalf("ClaimSend = %+v, %v", got, err)
+	}
+	if _, err := db.ClaimEditedSend(ctx, "E1", "mobile", "outra", t0); !errors.Is(err, ErrAnswered) {
+		t.Fatalf("edited send of an answered draft = %v, want ErrAnswered", err)
+	}
+}
