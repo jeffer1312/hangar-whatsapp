@@ -119,6 +119,31 @@ func TestDataSchemaVersionWhileAnotherBinaryWrites(t *testing.T) {
 	}
 }
 
+func TestDataSchemaVersionWithAWalButNoShm(t *testing.T) {
+	data := t.TempDir()
+	walDB(t, data, 1).Close()
+	w := walDB(t, data, 2)
+	// A copy of the folder that kept messages.db and its -wal but lost the -shm.
+	copied := t.TempDir()
+	for _, suffix := range []string{"", "-wal"} {
+		b, err := os.ReadFile(store.MessagesPath(data) + suffix)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(store.MessagesPath(copied)+suffix, b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w.Close()
+	// Without the -shm the WAL is not read: the version is the main file's or the WAL's, never higher.
+	if code, out, errOut := dataSchema(t, "--data", copied); code != 0 || (out != "1\n" && out != "2\n") {
+		t.Fatalf("--data-schema-version = %d %q, stderr %q; want 0 and 1 or 2", code, out, errOut)
+	}
+	if _, err := os.Stat(store.MessagesPath(copied) + "-shm"); !os.IsNotExist(err) {
+		t.Fatalf("-shm created: %v", err)
+	}
+}
+
 func TestDataSchemaVersionOnAFileThatIsNotSQLite(t *testing.T) {
 	data := t.TempDir()
 	if err := os.WriteFile(store.MessagesPath(data), []byte("not a database, just text long enough to have a header"), 0o600); err != nil {

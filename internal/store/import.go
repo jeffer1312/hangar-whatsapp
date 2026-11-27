@@ -74,7 +74,7 @@ func importMessages(oldPath, dst string) error {
 		return err
 	}
 	defer d.Close()
-	if _, err := d.w.Exec(`ATTACH DATABASE ? AS old`, "file:"+oldPath+"?mode=ro"); err != nil {
+	if _, err := d.w.Exec(`ATTACH DATABASE ? AS old`, fileURI(oldPath)+"?mode=ro"); err != nil {
 		return err
 	}
 	defer d.w.Exec(`DETACH DATABASE old`)
@@ -170,7 +170,7 @@ func copyFile(from, to string) error {
 
 // importSession writes one consistent file even when the source still has a -wal.
 func importSession(from, to string) error {
-	db, err := sql.Open("sqlite", "file:"+from+"?mode=ro")
+	db, err := sql.Open("sqlite", fileURI(from)+"?mode=ro")
 	if err != nil {
 		return err
 	}

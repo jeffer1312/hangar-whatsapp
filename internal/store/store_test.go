@@ -104,6 +104,28 @@ func TestOpenMigratesVersion1AfterCopyingIt(t *testing.T) {
 	}
 }
 
+func TestOpenInAFolderWithURICharacters(t *testing.T) {
+	parent := t.TempDir()
+	dir := filepath.Join(parent, "a#b?c%41d")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if _, err := os.Stat(MessagesPath(dir)); err != nil {
+		t.Fatalf("messages.db not in the folder: %v", err)
+	}
+	if entries, _ := os.ReadDir(parent); len(entries) != 1 {
+		t.Fatalf("files outside the folder: %v", entries)
+	}
+	if v, err := DataSchemaVersion(dir); err != nil || v != SchemaVersion {
+		t.Fatalf("DataSchemaVersion = %d, %v; want %d", v, err, SchemaVersion)
+	}
+}
+
 func TestNoBackupWithoutRaisingVersion(t *testing.T) {
 	dir := t.TempDir()
 	for range 2 {

@@ -42,9 +42,14 @@ type DB struct {
 
 func MessagesPath(dir string) string { return filepath.Join(dir, "messages.db") }
 
+// fileURI makes the SQLite URI of a path: %, ? and # in it would otherwise end the name or be decoded.
+func fileURI(path string) string {
+	return "file:" + strings.NewReplacer("%", "%25", "?", "%3f", "#", "%23").Replace(path)
+}
+
 // OpenSQLite opens a writer: one connection, because SQLite has one writer at a time.
 func OpenSQLite(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", "file:"+path+
+	db, err := sql.Open("sqlite", fileURI(path)+
 		"?_pragma=foreign_keys(1)&_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"+
 		"&_txlock=immediate")
 	if err != nil {
@@ -57,7 +62,7 @@ func OpenSQLite(path string) (*sql.DB, error) {
 // OpenSession opens session.db holding its lock for as long as it is open: a second process on
 // the same folder fails right away instead of running a second copy of the device keys.
 func OpenSession(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", "file:"+path+
+	db, err := sql.Open("sqlite", fileURI(path)+
 		"?_pragma=locking_mode(EXCLUSIVE)&_pragma=busy_timeout(0)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
 	if err != nil {
 		return nil, err
@@ -83,7 +88,7 @@ func Open(dir string) (*DB, error) {
 		return nil, err
 	}
 	// The read pool never writes: a slow API query cannot hold the writer.
-	r, err := sql.Open("sqlite", "file:"+MessagesPath(dir)+"?mode=ro&_pragma=busy_timeout(5000)")
+	r, err := sql.Open("sqlite", fileURI(MessagesPath(dir))+"?mode=ro&_pragma=busy_timeout(5000)")
 	if err != nil {
 		w.Close()
 		return nil, err
@@ -136,12 +141,15 @@ func DataSchemaVersion(dir string) (int, error) {
 		return 0, err
 	}
 	query := "?mode=ro&_pragma=busy_timeout(5000)"
-	// A read-only open of a WAL file creates -wal and -shm and cannot delete them. With no -wal on disk
-	// nobody is writing and the main file is whole, so immutable reads it without creating anything.
-	if _, err := os.Stat(path + "-wal"); errors.Is(err, fs.ErrNotExist) {
-		query = "?mode=ro&immutable=1"
+	// A read-only open of a WAL file creates the missing -wal or -shm and cannot delete them. Without both
+	// nobody is writing, so immutable reads the main file without creating anything; a WAL it skips can
+	// only hold a higher version, which the caller takes as a change.
+	for _, sidecar := range []string{"-wal", "-shm"} {
+		if _, err := os.Stat(path + sidecar); errors.Is(err, fs.ErrNotExist) {
+			query = "?mode=ro&immutable=1"
+		}
 	}
-	db, err := sql.Open("sqlite", "file:"+path+query)
+	db, err := sql.Open("sqlite", fileURI(path)+query)
 	if err != nil {
 		return 0, err
 	}
