@@ -554,7 +554,8 @@ func (s *Service) Logout(ctx context.Context) error {
 	return err
 }
 
-// Wipe logs out when it can, closes the databases and deletes messages.db, session.db and media/.
+// Wipe logs out when it can, closes the databases and deletes messages.db, its migration copies,
+// session.db, media/ and outbox/.
 // It says whether the phone was told (LogoutDone) or may still list this device (LogoutNotDone).
 func (s *Service) Wipe(ctx context.Context) (string, error) {
 	s.rw.Lock()

@@ -99,8 +99,12 @@ func TestOpenMigratesVersion1AfterCopyingIt(t *testing.T) {
 	if v, outbox, messages := inspect(t, bak); v != 1 || outbox != 0 || messages != 1 {
 		t.Fatalf("copy = version %d, outbox tables %d, messages %d; want 1, 0, 1", v, outbox, messages)
 	}
-	if fi, err := os.Stat(bak); err != nil || (runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600) {
-		t.Fatalf("copy mode = %v, %v; want 0600", fi.Mode().Perm(), err)
+	fi, err := os.Stat(bak)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
+		t.Fatalf("copy mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
 

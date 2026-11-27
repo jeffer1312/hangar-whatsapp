@@ -132,7 +132,8 @@ outros.
 - Antes de subir o `user_version` do `messages.db` de `v` para `--schema-version` (com `0 < v`), grava a cópia
   `<data>/messages.db.schema<v>.bak` (`VACUUM INTO`, por um nome temporário e rename: o `.bak` presente está
   sempre inteiro). Há uma por `v`, sobrescrita na migração seguinte do mesmo `v`; é ela que o Hangar repõe se o
-  binário novo não ficar de pé. O `wipe` apaga as cópias com o resto dos dados. Banco novo (`v = 0`) e coluna acrescentada sem subir o `user_version` (como na
+  binário novo não ficar de pé, tirando antes do caminho o `messages.db` com o `-wal`, o `-shm` e o `-journal` dele
+  (um `-wal` do banco migrado seria aplicado em cima da cópia). O `wipe` apaga as cópias com o resto dos dados. Banco novo (`v = 0`) e coluna acrescentada sem subir o `user_version` (como na
   v0.3.0) não fazem cópia.
 - Sai com código 4 (`backup_failed`) quando essa cópia não pôde ser gravada: nada migrou e o `messages.db` ficou
   como estava.
