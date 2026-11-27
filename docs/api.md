@@ -100,7 +100,16 @@ outros.
 ## Processo
 
 - `--version` imprime `hangar-whatsapp <versão> (api <n>)`; `api 2` tem o envio por rascunho (C5); `api 3`, a
-  edição do texto antes do envio, a foto da conversa e o tipo das recentes (C7).
+  edição do texto antes do envio, a foto da conversa e o tipo das recentes (C7). O formato não muda: o Hangar
+  instalado lê essa linha exata.
+- `--schema-version` imprime só a versão do esquema do `messages.db` que este binário grava (o
+  `user_version`, hoje `2`), seguida de `\n`, e sai com 0 sem abrir a pasta `--data`. Binário anterior a essa
+  flag sai com código diferente de 0.
+- `--data-schema-version --data <pasta>` imprime só o `user_version` do `<pasta>/messages.db` (`0` quando o arquivo
+  não existe), seguido de `\n`, e sai com 0. Só lê: não migra, não cria a pasta nem o arquivo e não deixa
+  `-wal`/`-shm` novos, e roda com o serviço de pé (outra versão com o banco aberto). Com `-wal` no disco e sem
+  `-shm` (cópia parcial da pasta), ler o `-wal` criaria o `-shm`: sai com 1. Arquivo que não abre também sai com
+  1, sempre com o motivo no stderr; sem `--data` sai com 2.
 - Mensagem só sai por rascunho que o dono aprovou (`POST /v1/outbox/{id}/send`), com "digitando", upload do
   anexo e a mensagem. O whatsmeow manda sozinho os recibos de entrega (os mesmos que o celular já manda) e
   nenhum recibo de leitura; o serviço não marca como lida nem aparece "online". Fora isso, o login, o logout
@@ -120,6 +129,14 @@ outros.
   `connected` nesse meio-tempo.
 - Sai com código 3 quando o `messages.db` é de um esquema mais novo (`schema_newer`): só um binário mais
   novo abre esses dados.
+- Antes de subir o `user_version` do `messages.db` de `v` para `--schema-version` (com `0 < v`), grava a cópia
+  `<data>/messages.db.schema<v>.bak` (`VACUUM INTO`, por um nome temporário e rename: o `.bak` presente está
+  sempre inteiro). Há uma por `v`, sobrescrita na migração seguinte do mesmo `v`; é ela que o Hangar repõe se o
+  binário novo não ficar de pé, tirando antes do caminho o `messages.db` com o `-wal`, o `-shm` e o `-journal` dele
+  (um `-wal` do banco migrado seria aplicado em cima da cópia). O `wipe` apaga as cópias com o resto dos dados. Banco novo (`v = 0`) e coluna acrescentada sem subir o `user_version` (como na
+  v0.3.0) não fazem cópia.
+- Sai com código 4 (`backup_failed`) quando essa cópia não pôde ser gravada: nada migrou e o `messages.db` ficou
+  como estava.
 
 ## C5. Envio por rascunho aprovado (api 2)
 
