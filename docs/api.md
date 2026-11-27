@@ -107,9 +107,9 @@ outros.
   flag sai com código diferente de 0.
 - `--data-schema-version --data <pasta>` imprime só o `user_version` do `<pasta>/messages.db` (`0` quando o arquivo
   não existe), seguido de `\n`, e sai com 0. Só lê: não migra, não cria a pasta nem o arquivo e não deixa
-  `-wal`/`-shm` novos, e roda com o serviço de pé (outra versão com o banco aberto). Faltando o `-wal` ou o
-  `-shm` no disco, lê só o arquivo principal: o `-wal` que ficar de fora só pode ter uma versão maior, então o
-  número lido nunca passa do real. Arquivo que não abre sai com 1 e o motivo no stderr; sem `--data` sai com 2.
+  `-wal`/`-shm` novos, e roda com o serviço de pé (outra versão com o banco aberto). Com `-wal` no disco e sem
+  `-shm` (cópia parcial da pasta), ler o `-wal` criaria o `-shm`: sai com 1. Arquivo que não abre também sai com
+  1, sempre com o motivo no stderr; sem `--data` sai com 2.
 - Mensagem só sai por rascunho que o dono aprovou (`POST /v1/outbox/{id}/send`), com "digitando", upload do
   anexo e a mensagem. O whatsmeow manda sozinho os recibos de entrega (os mesmos que o celular já manda) e
   nenhum recibo de leitura; o serviço não marca como lida nem aparece "online". Fora isso, o login, o logout

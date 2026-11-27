@@ -140,14 +140,23 @@ func DataSchemaVersion(dir string) (int, error) {
 		}
 		return 0, err
 	}
+	// A read-only open of a WAL file creates the missing -wal or -shm and cannot delete them.
+	hasWAL, err := exists(path + "-wal")
+	if err != nil {
+		return 0, err
+	}
+	hasSHM, err := exists(path + "-shm")
+	if err != nil {
+		return 0, err
+	}
 	query := "?mode=ro&_pragma=busy_timeout(5000)"
-	// A read-only open of a WAL file creates the missing -wal or -shm and cannot delete them. Without both
-	// nobody is writing, so immutable reads the main file without creating anything; a WAL it skips can
-	// only hold a higher version, which the caller takes as a change.
-	for _, sidecar := range []string{"-wal", "-shm"} {
-		if _, err := os.Stat(path + sidecar); errors.Is(err, fs.ErrNotExist) {
-			query = "?mode=ro&immutable=1"
-		}
+	switch {
+	case !hasWAL:
+		// Nobody is writing and the main file is whole: immutable reads it without creating anything.
+		query = "?mode=ro&immutable=1"
+	case !hasSHM:
+		// Reading the WAL would create the -shm, and skipping it could give a version below the real one.
+		return 0, fmt.Errorf("%s-wal without -shm: the version cannot be read without writing", path)
 	}
 	db, err := sql.Open("sqlite", fileURI(path)+query)
 	if err != nil {
@@ -159,6 +168,14 @@ func DataSchemaVersion(dir string) (int, error) {
 		return 0, fmt.Errorf("read %s: %w", path, err)
 	}
 	return v, nil
+}
+
+func exists(path string) (bool, error) {
+	_, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // backupPrefix starts the name of every copy backup writes next to messages.db.

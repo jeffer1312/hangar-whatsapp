@@ -135,9 +135,8 @@ func TestDataSchemaVersionWithAWalButNoShm(t *testing.T) {
 		}
 	}
 	w.Close()
-	// Without the -shm the WAL is not read: the version is the main file's or the WAL's, never higher.
-	if code, out, errOut := dataSchema(t, "--data", copied); code != 0 || (out != "1\n" && out != "2\n") {
-		t.Fatalf("--data-schema-version = %d %q, stderr %q; want 0 and 1 or 2", code, out, errOut)
+	if code, out, errOut := dataSchema(t, "--data", copied); code != 1 || out != "" || errOut == "" {
+		t.Fatalf("--data-schema-version with a -wal and no -shm = %d %q, stderr %q; want 1, nothing, a reason", code, out, errOut)
 	}
 	if _, err := os.Stat(store.MessagesPath(copied) + "-shm"); !os.IsNotExist(err) {
 		t.Fatalf("-shm created: %v", err)
